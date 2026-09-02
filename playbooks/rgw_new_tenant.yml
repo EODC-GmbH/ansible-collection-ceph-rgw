@@ -1,0 +1,212 @@
+---
+# Generate a tenant drop-in for the rgw_tenants role: one file with the rgw_tenant_${name} config block
+# and every account-root user's keys as inline !vault blocks. Run this before the role — the role only
+# ever reads keys from the vault, it never mints them. Touches no cluster.
+#
+# Bare run prompts for the account name and creates the account plus its primary root iam-$account-root:
+#   ansible-playbook playbooks/rgw_new_tenant.yml
+# Non-interactive (setting rgw_new_tenant via -e skips the prompt):
+#   ANSIBLE_VAULT_PASSWORD_FILE=~/.vault-pass \
+#   ansible-playbook playbooks/rgw_new_tenant.yml -e rgw_new_tenant=initrode_data_prod \
+#     -e '{"rgw_new_tenant_root_users": ["Erika Schröder", "backup"]}' \
+#     -e '{"rgw_new_tenant_quota": {"enabled": true, "max_size": 1099511627776, "max_objects": -1}}'
+#
+# Inputs (rgw_new_tenant is prompted or -e; the rest are -e only, all optional):
+#   rgw_new_tenant                     account name, ${org}_${purpose}[_${qualifier}], lowercase snake_case
+#   rgw_new_tenant_account_id          explicit "RGW"+17 digits; omit to allocate a Unix-time id
+#   rgw_new_tenant_root_users          raw names/labels for extra roots, each sanitized to a descriptor
+#   rgw_new_tenant_buckets             omit for none (default []); root users self-serve buckets
+#   rgw_new_tenant_quota               omit to fall back to the role's rgw_tenants_default_quota
+#   rgw_new_tenant_output_dir          the drop-in directory, default $playbook_dir/rgw_tenants.d
+#   rgw_new_tenant_vault_password_file default $ANSIBLE_VAULT_PASSWORD_FILE
+#   rgw_new_tenant_force               overwrite an existing drop-in (regenerates new keys)
+- name: Generate a tenant drop-in (account + root users + vaulted keys)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_prompt:
+    - name: rgw_new_tenant
+      prompt: "RGW tenant account name (e.g. initrode_data_prod)"
+      private: false
+  vars:
+    # Aliased to _nt_* instead of defaulting the public names here: a play var outranks inventory, so it
+    # would shadow any group_vars override and leave -e as the only way in.
+    _nt_output_dir: "{{ rgw_new_tenant_output_dir | default(playbook_dir ~ '/rgw_tenants.d', true) }}"
+    _nt_vault_password_file: "{{ rgw_new_tenant_vault_password_file | default(lookup('ansible.builtin.env', 'ANSIBLE_VAULT_PASSWORD_FILE'), true) }}"
+    rgw_new_tenant_force: false
+    rgw_new_tenant_buckets: []
+    rgw_new_tenant_root_users: []
+    _nt_existing_ids: "{{ rgw_tenants_list | default([], true) | map(attribute='account_id') | list }}"
+    # Same sanitizer person names get (lowercase, umlaut translit, space/hyphen -> _). The guard keeps an
+    # empty input as '' so the assert below reports it instead of the filter raising.
+    _nt_name: "{{ (rgw_new_tenant | underknowledge.ceph_rgw.ceph_descriptor) if (rgw_new_tenant | default('') | length > 0) else '' }}"
+    # Keep _nt_account_id out of play vars: its `date +%s%N` lookup re-runs on every reference, so the id
+    # asserted unique, the id written and the id reported would each differ. set_fact below pins it once.
+    _nt_root_user: "{{ _nt_name | underknowledge.ceph_rgw.ceph_root_uid }}"
+    _nt_root_slugs: "{{ rgw_new_tenant_root_users | map('underknowledge.ceph_rgw.ceph_descriptor') | list }}"
+    _nt_dropin_file: "{{ _nt_output_dir }}/{{ _nt_name }}.yml"
+  tasks:
+    - name: Assert an account name was provided
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - rgw_new_tenant is defined
+          - rgw_new_tenant | length > 0
+        fail_msg: >-
+          No account name. Pass -e rgw_new_tenant=<name> or answer the prompt.
+
+    - name: Warn when the account name was canonicalized
+      ansible.builtin.debug:
+        msg: >-
+          You entered '{{ rgw_new_tenant }}'; using the canonical account name '{{ _nt_name }}'.
+          It is permanent (uid, vault keys, bucket prefix, ARNs derive from it) -
+          re-run with the exact name if this is not it.
+      when: _nt_name != rgw_new_tenant
+
+    - name: Assert the account name is a valid <org>_<purpose>[_<qualifier>]
+      ansible.builtin.assert:
+        quiet: true
+        that: _nt_name | underknowledge.ceph_rgw.ceph_account_valid
+        fail_msg: >-
+          '{{ rgw_new_tenant }}' sanitizes to '{{ _nt_name }}', which is not a valid account name:
+          lowercase snake_case <org>_<purpose>, at least two _-separated ASCII segments,
+          e.g. initrode_data_prod.
+
+    # Unix-time id: `date +%s%N` (19 digits) cut to 17 = seconds + 7 fractional digits. Sorts by creation
+    # time, decodes back to it, and stays clear of the legacy RGW...001-006 block.
+    - name: Pin the account id
+      ansible.builtin.set_fact:
+        _nt_account_id: "{{ rgw_new_tenant_account_id | default('RGW' ~ lookup('ansible.builtin.pipe', 'date +%s%N')[:17], true) }}"
+
+    - name: Assert a vault password file is available
+      ansible.builtin.assert:
+        quiet: true
+        that: _nt_vault_password_file | length > 0
+        fail_msg: >-
+          No vault password file to encrypt the generated keys with. Export
+          ANSIBLE_VAULT_PASSWORD_FILE, or pass -e rgw_new_tenant_vault_password_file=<path>
+          (e.g. kayobe's vault helper).
+
+    - name: Gather account_ids already present in the drop-in directory
+      ansible.builtin.set_fact:
+        _nt_dir_ids: "{{ (_nt_dir_ids | default([])) + (lookup('ansible.builtin.file', item) | regex_findall('RGW[0-9]{17}')) }}"
+      loop: "{{ query('ansible.builtin.fileglob', _nt_output_dir ~ '/*.yml') }}"
+      loop_control:
+        label: "{{ item | basename }}"
+
+    - name: Assert the account_id is well-formed and unused
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - _nt_account_id is match('^RGW[0-9]{17}$')
+          - _nt_account_id not in (_nt_existing_ids + (_nt_dir_ids | default([])))
+        fail_msg: >-
+          account_id {{ _nt_account_id }} is malformed, or already exists in rgw_tenants_list
+          or {{ _nt_output_dir }}. Re-run, or pass -e rgw_new_tenant_account_id=.
+
+    - name: Ensure the output directory exists
+      ansible.builtin.file:
+        path: "{{ _nt_output_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Refuse to clobber an existing drop-in unless forced
+      ansible.builtin.stat:
+        path: "{{ _nt_dropin_file }}"
+      register: _nt_existing_file
+
+    - name: Fail if the drop-in already exists and force is off
+      ansible.builtin.assert:
+        quiet: true
+        that: not _nt_existing_file.stat.exists
+        fail_msg: >-
+          {{ _nt_dropin_file }} already exists. To add a root user, run the rgw_add_root_user playbook;
+          to remove one, set its root_users entry state: absent, re-run the role, then delete the entry;
+          to regenerate from scratch with new keys, pass -e rgw_new_tenant_force=true.
+      when: not (rgw_new_tenant_force | bool)
+
+    - name: Build the root_users config list
+      ansible.builtin.set_fact:
+        _nt_root_users_cfg: "{{ (_nt_root_users_cfg | default([])) + [{'name': item}] }}"
+      loop: "{{ _nt_root_slugs }}"
+
+    # Secrets go down stdin, never argv. Keep `--encrypt-vault-id default`: it is what disambiguates our
+    # --vault-password-file from the outer run's ANSIBLE_VAULT_PASSWORD_FILE. The /dev/null path keeps the
+    # password lookup from caching the minted key to disk.
+    - name: Encrypt the primary root's access key
+      ansible.builtin.command:
+        argv: [ansible-vault, encrypt_string, --vault-password-file, "{{ _nt_vault_password_file }}",
+               --encrypt-vault-id, default, --stdin-name, "vault_rgw_tenants_{{ _nt_name }}_access_key"]
+        stdin: "IAM{{ lookup('ansible.builtin.password', '/dev/null length=17 chars=ascii_uppercase,digits') }}"
+        stdin_add_newline: false
+      register: _nt_enc_access
+      changed_when: false
+      no_log: true
+
+    - name: Encrypt the primary root's secret key
+      ansible.builtin.command:
+        argv: [ansible-vault, encrypt_string, --vault-password-file, "{{ _nt_vault_password_file }}",
+               --encrypt-vault-id, default, --stdin-name, "vault_rgw_tenants_{{ _nt_name }}_secret_key"]
+        stdin: "{{ lookup('ansible.builtin.password', '/dev/null length=40 chars=ascii_letters,digits') }}"
+        stdin_add_newline: false
+      register: _nt_enc_secret
+      changed_when: false
+      no_log: true
+
+    - name: Encrypt each extra root's access key
+      ansible.builtin.command:
+        argv: [ansible-vault, encrypt_string, --vault-password-file, "{{ _nt_vault_password_file }}",
+               --encrypt-vault-id, default, --stdin-name, "vault_rgw_tenants_{{ _nt_name }}_root_{{ item }}_access_key"]
+        stdin: "IAM{{ lookup('ansible.builtin.password', '/dev/null length=17 chars=ascii_uppercase,digits') }}"
+        stdin_add_newline: false
+      loop: "{{ _nt_root_slugs }}"
+      register: _nt_enc_root_access
+      changed_when: false
+      no_log: true
+
+    - name: Encrypt each extra root's secret key
+      ansible.builtin.command:
+        argv: [ansible-vault, encrypt_string, --vault-password-file, "{{ _nt_vault_password_file }}",
+               --encrypt-vault-id, default, --stdin-name, "vault_rgw_tenants_{{ _nt_name }}_root_{{ item }}_secret_key"]
+        stdin: "{{ lookup('ansible.builtin.password', '/dev/null length=40 chars=ascii_letters,digits') }}"
+        stdin_add_newline: false
+      loop: "{{ _nt_root_slugs }}"
+      register: _nt_enc_root_secret
+      changed_when: false
+      no_log: true
+
+    # The vault_ names below are what the role looks up by string; rename either side and its
+    # "keys are defined" assert fails. Empty buckets/quota/root_users stay out of the entry.
+    - name: Write the tenant drop-in (config + vaulted keys, together)
+      ansible.builtin.copy:
+        dest: "{{ _nt_dropin_file }}"
+        mode: "0600"
+        content: |
+          ---
+          # Tenant drop-in for the rgw_tenants role, generated by rgw_new_tenant.
+          # Drop into the directory rgw_tenants_dir points at; delete to remove the tenant.
+          # Config + account-root keys live together; keys are inline !vault (safe to commit).
+          {{ {'rgw_tenant_' ~ _nt_name: _nt_entry} | to_nice_yaml }}
+          {{ _nt_enc_access.stdout }}
+          {{ _nt_enc_secret.stdout }}
+          {% for i in range(_nt_root_slugs | length) %}
+          {{ _nt_enc_root_access.results[i].stdout }}
+          {{ _nt_enc_root_secret.results[i].stdout }}
+          {% endfor %}
+      vars:
+        _nt_entry: >-
+          {{ {'name': _nt_name, 'account_id': _nt_account_id, 'root_user': _nt_root_user}
+             | combine({'buckets': rgw_new_tenant_buckets} if (rgw_new_tenant_buckets | length > 0) else {})
+             | combine({'quota': rgw_new_tenant_quota} if (rgw_new_tenant_quota is defined) else {})
+             | combine({'root_users': _nt_root_users_cfg | default([])} if (_nt_root_slugs | length > 0) else {}) }}
+
+    - name: Report what was generated (no secrets shown)
+      ansible.builtin.debug:
+        msg:
+          - "tenant:      {{ _nt_name }}  ({{ _nt_account_id }})"
+          - "primary root: {{ _nt_root_user }}"
+          - "extra roots: {{ _nt_root_slugs | map('regex_replace', '^', 'iam-' ~ _nt_name ~ '-root-') | list | default(['(none)'], true) }}"
+          - "buckets:     {{ rgw_new_tenant_buckets | default([], true) | join(', ') | default('(none)', true) }}"
+          - "quota:       {{ 'set' if (rgw_new_tenant_quota is defined) else 'omitted (falls back to rgw_tenants_default_quota)' }}"
+          - "drop-in:     {{ _nt_dropin_file }}"
+          - "next: point rgw_tenants_dir at {{ _nt_output_dir }}, review, commit, run rgw_tenants."

@@ -1,0 +1,89 @@
+---
+argument_specs:
+  main:
+    short_description: Enable native Ceph RGW STS.
+    description:
+      - Sets the STS signing key and S3 STS auth, and creates standalone AssumeRole IAM
+        roles. Run before the rgw_tenants role.
+    options:
+      rgw_sts_ceph_major_min:
+        type: int
+        required: false
+        default: 19
+        description: >-
+          Oldest Ceph major the role will run against, checked against the RGW daemons before
+          anything else. 19 (squid) is the floor: rgw_sts_roles creates account-scoped roles, and accounts are a squid feature. Below it the role fails rather than
+          letting radosgw-admin report an unrecognised subcommand as a missing object.
+      rgw_sts_ceph_major_tested:
+        type: int
+        required: false
+        default: 20
+        description: >-
+          Newest Ceph major this role was exercised on. Past it the role warns and continues -
+          refusing to run on a new Ceph would make this collection the thing blocking an
+          upgrade. See docs/CEPH-VERSIONS.md.
+      rgw_sts_ceph_version_check:
+        type: bool
+        required: false
+        default: true
+        description: >-
+          Run the RGW version check at all. Turn it off for a build whose version string
+          cannot be parsed (a vendor rebuild); you then own verifying that accounts and IAM
+          behave the way this role assumes.
+      rgw_sts_key:
+        type: str
+        required: false
+        description: >-
+          STS session-token signing key, from vault. Required: the role asserts it is non-empty
+          and fails rather than leaving Ceph's insecure default signing key in place.
+      rgw_sts_roles:
+        type: list
+        elements: dict
+        required: false
+        description: >-
+          Standalone IAM roles for AssumeRole. Normally empty - rgw_tenants provisions the
+          web-identity roles itself.
+        options:
+          name:
+            type: str
+            required: true
+            description: Role name.
+          account_id:
+            type: str
+            required: true
+            description: >-
+              Account id to scope the role to. Required, and validated here so the run stops
+              before any document is staged. Without it radosgw-admin would create a
+              tenant-level role through the admin-only CreateRole/PutRolePolicy that tentacle
+              deprecated and that is slated for removal no sooner than the V release, so the
+              role refuses rather than offering it as a fallback.
+          trust_policy:
+            type: dict
+            required: true
+            description: The assume-role (trust) policy document.
+          policies:
+            type: list
+            elements: dict
+            required: true
+            description: Permission policies to attach.
+            options:
+              name:
+                type: str
+                required: true
+                description: Policy name.
+              document:
+                type: dict
+                required: true
+                description: The permission policy document.
+      rgw_sts_service_name:
+        type: str
+        required: false
+        description: cephadm RGW service to restart on config change (default rgw.rgw).
+      rgw_sts_bootstrap_host:
+        type: str
+        required: false
+        description: Host that runs the ceph commands (default groups['mons'][0]).
+      rgw_sts_fsid:
+        type: str
+        required: false
+        description: Cluster fsid. Empty discovers it via ceph fsid.

@@ -1,0 +1,103 @@
+---
+# Values reach bash as positional params through argv, never interpolated into a shell string. That is
+# why there is no `| quote` here. Don't fold it into a single shell line.
+- name: Ensure one RGW account per tenant
+  ansible.builtin.command:
+    argv:
+      - cephadm
+      - shell
+      - --
+      - bash
+      - -c
+      - |
+        acct=$1; name=$2
+        if radosgw-admin account get --account-id="$acct" >/dev/null 2>&1; then
+          echo OK
+        else
+          radosgw-admin account create --account-name="tenant-$name" --account-id="$acct" >/dev/null && echo CREATED
+        fi
+      - _
+      - "{{ item.account_id }}"
+      - "{{ item.name }}"
+  loop: "{{ _rgw_tenants_present }}"
+  loop_control:
+    label: "tenant-{{ item.name }} ({{ item.account_id }})"
+  register: rgw_tenants_account_reg
+  changed_when: "'CREATED' in rgw_tenants_account_reg.stdout"
+  become: true
+
+# Keep --display-name equal to --uid. A user ARN is $account_id:user/$display_name, so a divergence
+# would leave this uid unaddressable from a policy that names the user. Nothing here does that today.
+# radosgw-admin takes no keyfile and reads no env, so
+# the vaulted keys ride argv. no_log keeps them out of Ansible output, not out of the host `ps` for the
+# life of the call; consider hidepid=2 on the mon.
+- name: Ensure the primary account-root user per tenant
+  ansible.builtin.command:
+    argv:
+      - cephadm
+      - shell
+      - --
+      - bash
+      - -c
+      - |
+        uid=$1; acct=$2; ak=$3; sk=$4
+        if radosgw-admin user info --uid="$uid" --account-id="$acct" >/dev/null 2>&1; then
+          echo OK
+        else
+          radosgw-admin user create --uid="$uid" --account-id="$acct" --account-root \
+            --display-name="$uid" --access-key="$ak" --secret-key="$sk" >/dev/null && echo CREATED
+        fi
+      - _
+      - "{{ item.root_user | default(item.name ~ 'root') }}"
+      - "{{ item.account_id }}"
+      - "{{ lookup('vars', 'vault_rgw_tenants_' ~ item.name ~ '_access_key') }}"
+      - "{{ lookup('vars', 'vault_rgw_tenants_' ~ item.name ~ '_secret_key') }}"
+  loop: "{{ _rgw_tenants_present }}"
+  loop_control:
+    label: "{{ item.root_user | default(item.name ~ 'root') }}"
+  register: rgw_tenants_user_reg
+  changed_when: "'CREATED' in rgw_tenants_user_reg.stdout"
+  no_log: true
+  become: true
+
+# This is the only task that touches a live user's keys; the create above leaves an existing user alone.
+# Gated, and it writes only on drift between vault and server. The other access keys are pruned, so a
+# tenant is left with exactly one.
+- name: Rotate account-root S3 keys to the vaulted value (gated)
+  ansible.builtin.command:
+    argv:
+      - cephadm
+      - shell
+      - --
+      - bash
+      - -c
+      - |
+        set -eu
+        uid=$1; acct=$2; ak=$3; sk=$4
+        info=$(radosgw-admin user info --uid="$uid" --account-id="$acct")
+        match=$(printf '%s' "$info" | AK="$ak" SK="$sk" python3 -c 'import sys,json,os; ks=json.load(sys.stdin).get("keys",[]); print("yes" if any(k.get("access_key")==os.environ["AK"] and k.get("secret_key")==os.environ["SK"] for k in ks) else "no")')
+        if [ "$match" = yes ]; then
+          echo OK
+        else
+          # Install the vaulted key before pruning the old ones, so a failed create (set -e aborts here)
+          # never strands the account key-less.
+          radosgw-admin key create --uid="$uid" --account-id="$acct" \
+            --access-key="$ak" --secret-key="$sk" >/dev/null
+          for old in $(printf '%s' "$info" | AK="$ak" python3 -c 'import sys,json,os; [print(k["access_key"]) for k in json.load(sys.stdin).get("keys",[]) if k.get("access_key")!=os.environ["AK"]]'); do
+            radosgw-admin key rm --uid="$uid" --account-id="$acct" --access-key="$old" >/dev/null
+          done
+          echo CHANGED
+        fi
+      - _
+      - "{{ item.root_user | default(item.name ~ 'root') }}"
+      - "{{ item.account_id }}"
+      - "{{ lookup('vars', 'vault_rgw_tenants_' ~ item.name ~ '_access_key') }}"
+      - "{{ lookup('vars', 'vault_rgw_tenants_' ~ item.name ~ '_secret_key') }}"
+  loop: "{{ _rgw_tenants_present }}"
+  loop_control:
+    label: "{{ item.root_user | default(item.name ~ 'root') }}"
+  register: rgw_tenants_rotate_reg
+  changed_when: "'CHANGED' in rgw_tenants_rotate_reg.stdout"
+  no_log: true
+  become: true
+  when: (rgw_tenants_rotate_keys | bool) or (item.rotate_keys | default(false) | bool)

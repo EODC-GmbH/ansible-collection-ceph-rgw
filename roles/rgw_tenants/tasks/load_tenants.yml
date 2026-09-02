@@ -1,0 +1,45 @@
+---
+# Assembles rgw_tenants_list from the drop-ins. Both entry points must include it: verify.yml is
+# entered with tasks_from=verify, which never runs main.yml, and verifying an empty list reports
+# success having checked nothing.
+- name: Load tenant drop-ins (config + vaulted keys) from rgw_tenants_dir
+  ansible.builtin.include_vars:
+    dir: "{{ rgw_tenants_dir }}"
+    extensions:
+      - yml
+      - yaml
+    # Keep this: include_vars checks the extension of every file it walks and aborts the run over a
+    # README or an EXAMPLE.yml.sample it was never meant to read.
+    ignore_unknown_extensions: true
+  when: rgw_tenants_dir | length > 0
+
+# lookup('vars', ...), not map('extract', vars): the internal `vars` dictionary is deprecated in
+# ansible-core, removal announced for 2.24, which warns on every use. Both give the same value on
+# 2.21, so this buys forward compatibility and fixes nothing.
+# Keep the prefix singular. rgw_tenant_ is what stops the pattern matching this role's own
+# rgw_tenants_* variables.
+- name: Collect the drop-in tenants
+  ansible.builtin.set_fact:
+    _rgw_tenants_dropins: "{{ (_rgw_tenants_dropins | default([])) + [lookup('vars', item)] }}"
+  loop: "{{ query('ansible.builtin.varnames', '^rgw_tenant_[a-z0-9_]+$') | sort }}"
+  loop_control:
+    label: "{{ item }}"
+  when: rgw_tenants_dir | length > 0
+
+# Dedupe by name, last wins. set_fact persists for the whole run, so without it a role invoked
+# twice in one play (a plan pass, then an apply pass) provisions every tenant twice.
+- name: Assemble rgw_tenants_list
+  ansible.builtin.set_fact:
+    rgw_tenants_list: "{{ dict(_rgw_seen | map(attribute='name') | zip(_rgw_seen)).values() | list }}"
+  vars:
+    _rgw_seen: "{{ (rgw_tenants_list | default([], true)) + (_rgw_tenants_dropins | default([])) }}"
+
+# Ansible validates a role's arguments as its FIRST task, before this file has assembled anything,
+# so on the drop-in path rgw_tenants_list is still [] and the tenant sub-schema checks nothing.
+# Re-run it here or a typo'd drop-in key passes in silence.
+- name: Validate the assembled tenant list against the role's argument spec
+  ansible.builtin.validate_argument_spec:
+    argument_spec: "{{ (lookup('ansible.builtin.file', role_path ~ '/meta/argument_specs.yml') | from_yaml).argument_specs.main.options }}"
+    provided_arguments:
+      rgw_tenants_list: "{{ rgw_tenants_list | default([], true) }}"
+  when: rgw_tenants_list | default([], true) | length > 0

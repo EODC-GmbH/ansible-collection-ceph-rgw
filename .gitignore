@@ -1,0 +1,44 @@
+# Build artifacts / archives (e.g. underknowledge-ceph_rgw-0.2.0.tar.gz).
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tgz
+*.zip
+
+*.pyc
+__pycache__/
+roles/*/files/__pycache__/
+.venv/
+
+# Hidden files and directories are ignored by default (e.g. editor and tool state).
+# Files already tracked stay tracked. Force-add a new one with `git add -f`.
+.*
+!.gitignore
+!.ansible-lint
+
+# Markdown is ignored by default to keep drafts and scratch notes out of commits.
+*.md
+# Shipped documentation is the exception, and it is named here rather than left to
+# `git add -f`: these files are only in the tree today because they were already tracked
+# before the rule existed. A new role's README would be silently untracked, and a re-init
+# would drop all of them -- including the one galaxy.yml declares as `readme:`.
+!README.md
+!CHANGELOG.md
+!roles/*/README.md
+# docs/ likewise: the roles' fail_msg text points operators at docs/CEPH-VERSIONS.md by
+# name, so ignoring it means shipping a dangling pointer.
+!docs/*.md
+
+# Editor / temp / backup files (nano, vim, emacs, generic scratch).
+*~
+*.bak
+*.tmp
+*.orig
+*.swp
+*.swo
+*.save
+.*.swp
+.*.swo
+\#*\#
+.\#*

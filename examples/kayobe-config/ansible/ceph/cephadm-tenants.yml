@@ -1,0 +1,18 @@
+---
+# OIDC-federated, multi-tenant S3 on Ceph RGW: per tenant an account, buckets, OIDC provider and per-tier
+# web-identity IAM roles. Import it after cephadm-sts.yml — the STS key and S3 STS auth must be on first.
+# Values come from your environment's cephadm.yml, the account-root keys from its vault
+# (vault_rgw_tenants_${name}_access_key / _secret_key).
+#
+# Copy into etc/kayobe/ansible/ceph/ and add the import_playbook to cephadm.yml.
+- name: Provision Ceph RGW tenants
+  gather_facts: false
+  hosts: mons
+  become: true
+  tags:
+    - cephadm
+    - cephadm-tenants
+  tasks:
+    - name: Apply Cephadm RGW multi-tenant configuration
+      ansible.builtin.import_role:
+        name: underknowledge.ceph_rgw.rgw_tenants

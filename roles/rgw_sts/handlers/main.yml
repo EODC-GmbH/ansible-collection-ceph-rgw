@@ -1,0 +1,8 @@
+---
+# RGW reads rgw_sts_key and rgw_s3_auth_use_sts at daemon startup, so neither takes effect until the
+# radosgw processes bounce. `ceph orch restart` returns before they are back; give it a few seconds.
+- name: Restart RGW
+  ansible.builtin.command: "cephadm shell -- ceph orch restart {{ rgw_sts_service_name }}"
+  changed_when: true
+  become: true
+  when: inventory_hostname == rgw_sts_bootstrap_host

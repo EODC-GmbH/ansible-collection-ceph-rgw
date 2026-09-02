@@ -1,0 +1,181 @@
+---
+# state: absent path, reached only once rgw_tenants_allow_teardown is set. Do not reorder:
+# buckets -> OIDC provider -> tier roles -> root users -> account. The provider delete signs as the
+# account-root, so that user cannot go before it, and `account rm` refuses while any user remains.
+# Every step is idempotent.
+- name: Remove buckets for decommissioned tenants
+  ansible.builtin.command:
+    argv:
+      - cephadm
+      - shell
+      - --
+      - bash
+      - -c
+      - |
+        purge=$1; list=$2
+        changed=no
+        for b in $(printf '%s' "$list" | tr ',' ' '); do
+          radosgw-admin bucket stats --bucket="$b" >/dev/null 2>&1 || continue
+          if [ "$purge" = yes ]; then
+            radosgw-admin bucket rm --bucket="$b" --purge-objects >/dev/null && changed=yes
+          else
+            radosgw-admin bucket rm --bucket="$b" >/dev/null 2>&1 \
+              || { echo "could not remove bucket $b (non-empty? set item.purge_objects AND -e rgw_tenants_allow_purge=true to force)" >&2; exit 1; }
+            changed=yes
+          fi
+        done
+        [ "$changed" = yes ] && echo CHANGED || echo OK
+      - _
+      - "{{ 'yes' if (item.purge_objects | default(false) | bool) and (rgw_tenants_allow_purge | bool) else 'no' }}"
+      - "{{ item.buckets | default([]) | join(',') }}"
+  loop: "{{ _rgw_tenants_absent }}"
+  loop_control:
+    label: "{{ item.name }}: {{ item.buckets | default([]) | join(', ') }}"
+  register: rgw_tenants_teardown_buckets_reg
+  changed_when: "'CHANGED' in rgw_tenants_teardown_buckets_reg.stdout"
+  become: true
+  when: item.buckets | default([]) | length > 0
+
+# Signs as the account-root; that user is removed further down, so this cannot move after it.
+- name: Delete the OIDC provider for decommissioned tenants
+  ansible.builtin.command: "python3 /var/run/ceph/{{ _rgw_tenants_fsid }}/manage_oidc_provider.py"
+  environment:
+    STATE: absent
+    IAM_ENDPOINT: "{{ rgw_tenants_endpoint }}"
+    AWS_REGION: "{{ rgw_tenants_s3_region }}"
+    OIDC_PROVIDER_URL: "{{ rgw_tenants_oidc.provider_url }}"
+    OIDC_CLIENT_IDS: ""
+    OIDC_THUMBPRINTS: ""
+    AWS_ACCESS_KEY_ID: "{{ lookup('vars', 'vault_rgw_tenants_' ~ item.name ~ '_access_key') }}"
+    AWS_SECRET_ACCESS_KEY: "{{ lookup('vars', 'vault_rgw_tenants_' ~ item.name ~ '_secret_key') }}"
+  loop: "{{ _rgw_tenants_absent }}"
+  loop_control:
+    label: "{{ item.name }} ({{ item.account_id }})"
+  register: rgw_tenants_teardown_oidc_reg
+  changed_when: "'DELETED' in rgw_tenants_teardown_oidc_reg.stdout"
+  no_log: true
+
+# Every role under the tenant's own "$name-" prefix, so renamed and retired tiers are caught too.
+- name: Delete tier IAM roles for decommissioned tenants
+  ansible.builtin.command:
+    argv:
+      - cephadm
+      - shell
+      - --
+      - bash
+      - -c
+      - |
+        acct=$1; prefix=$2
+        changed=no
+        for r in $(radosgw-admin role list --account-id="$acct" | python3 -c 'import sys,json; d=json.load(sys.stdin); rs=d if isinstance(d,list) else d.get("Roles",[]); [print(x.get("RoleName") or x.get("role_name") or x.get("name","")) for x in rs]'); do
+          case "$r" in "$prefix"*) : ;; *) continue ;; esac
+          radosgw-admin role-policy delete --role-name="$r" --account-id="$acct" --policy-name=tenant >/dev/null 2>&1 || true
+          radosgw-admin role delete --role-name="$r" --account-id="$acct" >/dev/null && changed=yes
+        done
+        [ "$changed" = yes ] && echo CHANGED || echo OK
+      - _
+      - "{{ item.account_id }}"
+      - "{{ item.name }}-"
+  loop: "{{ _rgw_tenants_absent }}"
+  loop_control:
+    label: "{{ item.name }}-*"
+  register: rgw_tenants_teardown_roles_reg
+  changed_when: "'CHANGED' in rgw_tenants_teardown_roles_reg.stdout"
+  become: true
+
+# `account rm` refuses while any user remains, so the declared root_users go before the primary root.
+- name: Remove additional root users for decommissioned tenants
+  ansible.builtin.command:
+    argv:
+      - cephadm
+      - shell
+      - --
+      - bash
+      - -c
+      - |
+        uid=$1; acct=$2
+        if radosgw-admin user info --uid="$uid" --account-id="$acct" >/dev/null 2>&1; then
+          radosgw-admin user rm --uid="$uid" --account-id="$acct" >/dev/null && echo CHANGED
+        else
+          echo OK
+        fi
+      - _
+      - "iam-{{ item.0.name }}-root-{{ item.1.name }}"
+      - "{{ item.0.account_id }}"
+  loop: "{{ _rgw_tenants_absent | subelements('root_users', skip_missing=true) }}"
+  loop_control:
+    label: "iam-{{ item.0.name }}-root-{{ item.1.name }}"
+  register: rgw_tenants_teardown_rootusers_reg
+  changed_when: "'CHANGED' in rgw_tenants_teardown_rootusers_reg.stdout"
+  become: true
+
+- name: Remove the account-root user for decommissioned tenants
+  ansible.builtin.command:
+    argv:
+      - cephadm
+      - shell
+      - --
+      - bash
+      - -c
+      - |
+        uid=$1; acct=$2
+        if radosgw-admin user info --uid="$uid" --account-id="$acct" >/dev/null 2>&1; then
+          radosgw-admin user rm --uid="$uid" --account-id="$acct" >/dev/null && echo CHANGED
+        else
+          echo OK
+        fi
+      - _
+      - "{{ item.root_user | default(item.name ~ 'root') }}"
+      - "{{ item.account_id }}"
+  loop: "{{ _rgw_tenants_absent }}"
+  loop_control:
+    label: "{{ item.root_user | default(item.name ~ 'root') }}"
+  register: rgw_tenants_teardown_user_reg
+  changed_when: "'CHANGED' in rgw_tenants_teardown_user_reg.stdout"
+  become: true
+
+# A plain `account rm` refuses while the account still holds buckets, users, roles or groups. Anything the
+# tenant made for itself fails the run here until purge_objects switches this to --purge-data.
+- name: Remove the RGW account for decommissioned tenants
+  ansible.builtin.command:
+    argv:
+      - cephadm
+      - shell
+      - --
+      - bash
+      - -c
+      - |
+        set -u
+        acct=$1; purge=$2
+        # "Already gone" is one specific error, not any error. This ran last in the teardown,
+        # after the buckets, the provider, the roles and every user including the account root
+        # were already deleted -- so reading an unreachable mon or an unreadable keyring as
+        # "absent" reports the tenant decommissioned while leaving a live account that nothing
+        # can authenticate to, and every later plan and report agrees it is gone.
+        if err=$(radosgw-admin account get --account-id="$acct" 2>&1 >/dev/null); then
+          :
+        else
+          rc=$?
+          printf '%s\n' "$err" | grep -qE 'NoSuchEntity|[Cc]an.t find account|[Nn]o such account' \
+            || { echo "account get for $acct failed (exit $rc), and this is not a recognised not-found; refusing to report the teardown complete:" >&2
+                 printf '%s\n' "$err" >&2; exit 1; }
+          echo OK; exit 0
+        fi
+        if [ "$purge" = yes ]; then
+          radosgw-admin account rm --account-id="$acct" --purge-data >/dev/null \
+            || { echo "account rm --purge-data failed for $acct" >&2; exit 1; }
+          echo CHANGED
+        else
+          radosgw-admin account rm --account-id="$acct" >/dev/null 2>&1 \
+            || { echo "account $acct not empty (tenant-created buckets/users/roles remain); set item.purge_objects AND -e rgw_tenants_allow_purge=true to cascade" >&2; exit 1; }
+          echo CHANGED
+        fi
+      - _
+      - "{{ item.account_id }}"
+      - "{{ 'yes' if (item.purge_objects | default(false) | bool) and (rgw_tenants_allow_purge | bool) else 'no' }}"
+  loop: "{{ _rgw_tenants_absent }}"
+  loop_control:
+    label: "{{ item.name }} ({{ item.account_id }})"
+  register: rgw_tenants_teardown_account_reg
+  changed_when: "'CHANGED' in rgw_tenants_teardown_account_reg.stdout"
+  become: true

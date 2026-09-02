@@ -1,0 +1,52 @@
+---
+# Read-only drift preview: what a real run would change, per configured tenant. Every radosgw-admin call
+# here is a get/list/info/stats.
+- name: Stage the plan helper
+  ansible.builtin.copy:
+    src: plan_tenants.py
+    dest: "/var/run/ceph/{{ _rgw_tenants_fsid }}/plan_tenants.py"
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+# `cephadm shell` carries none of the host env into the container, so the config rides a file in the
+# bind-mounted fsid dir instead.
+- name: Stage the plan input (desired tenants + tiers)
+  ansible.builtin.copy:
+    content: >-
+      {{ {'desired': rgw_tenants_list,
+          'tiers': rgw_tenants_tiers | map(attribute='name') | list,
+          'default_quota': rgw_tenants_default_quota} | to_json }}
+    dest: "/var/run/ceph/{{ _rgw_tenants_fsid }}/plan_input.json"
+    owner: root
+    group: root
+    mode: "0600"
+  become: true
+
+- name: Compute the drift plan (read-only)
+  ansible.builtin.command: cephadm shell -- python3 /var/run/ceph/plan_tenants.py
+  register: _rgw_plan_out
+  changed_when: false
+  check_mode: false
+  become: true
+
+- name: Parse the plan
+  ansible.builtin.set_fact:
+    _rgw_plan: "{{ (_rgw_plan_out.stdout | underknowledge.ceph_rgw.ceph_json).tenants }}"
+
+- name: "Plan: per tenant"
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.name }} ({{ item.account_id }}) [{{ item.state }}]:
+      {{ item.changes if item.changes else ['up to date (no changes)'] }}
+  loop: "{{ _rgw_plan }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: "Plan: summary"
+  ansible.builtin.debug:
+    msg: >-
+      {{ _rgw_plan | length }} tenants:
+      {{ _rgw_plan | selectattr('changes', 'defined') | selectattr('changes') | list | length }} would change,
+      {{ _rgw_plan | rejectattr('changes') | list | length }} up to date.

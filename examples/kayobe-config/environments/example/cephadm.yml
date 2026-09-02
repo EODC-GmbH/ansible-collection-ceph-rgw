@@ -1,0 +1,77 @@
+---
+# Example RGW STS + tenants configuration. Merge these keys into your kayobe environment's cephadm.yml
+# (e.g. environments/$env/cephadm.yml). Everything here is non-secret; the account-root S3 keys live in
+# the vault (see secrets.yml.example).
+
+# rgw_sts: reference the vaulted signing key, never inline it.
+rgw_sts_key: "{{ vault_rgw_sts_key }}"
+
+# Standalone AssumeRole IAM roles. Usually empty: the tenants layer generates the web-identity roles
+# itself. If you do populate this, give every entry an account_id — a role without one is tenant-level,
+# which tentacle deprecated and V may remove.
+rgw_sts_roles: []
+
+# service_name / bootstrap_host / fsid exist once per role, each with its own prefix. Defaults: rgw.rgw,
+# auto-discovered fsid, first mon. Override in pairs — each role restarts the service its own
+# *_service_name names (ceph orch ls --service-type rgw):
+#   rgw_sts_service_name: "rgw.default"
+#   rgw_tenants_service_name: "rgw.default"
+
+# rgw_tenants: the RGW S3/IAM/STS endpoint the bootstrap host can reach.
+rgw_tenants_endpoint: "http://ceph-rgw.internal.example:8080"
+
+# The OIDC realm that mints web-identity tokens (Keycloak here). provider_url is the token issuer (`iss`),
+# client_ids the accepted audiences, thumbprints the SHA1 hex of the JWKS signing cert (the use=sig key's
+# x5c) — not the IdP TLS chain. Recompute them whenever the realm signing key rotates.
+rgw_tenants_oidc:
+  provider_url: "https://idp.example.com/realms/myrealm"
+  client_ids: ["ceph-s3"]
+  # The role rejects this CHANGEME sentinel: it is not 40-hex. Compute the real value with:
+  #   curl -s https://idp.example.com/realms/myrealm/protocol/openid-connect/certs \
+  #     | python3 -c 'import sys,json,base64,hashlib; \
+  #       k=[k for k in json.load(sys.stdin)["keys"] if k.get("use")=="sig"][0]; \
+  #       der=base64.b64decode(k["x5c"][0]); print(hashlib.sha1(der).hexdigest())'
+  thumbprints: ["CHANGEME-40-hex-sha1-of-the-jwks-signing-cert"]
+
+# Optional: reshape the tiers. Defaults are admin (s3:*) / writer / reader.
+# rgw_tenants_tiers:
+#   - { name: admin,  actions: ["s3:*"] }
+#   - { name: writer, actions: ["s3:ListBucket","s3:GetObject","s3:PutObject","s3:DeleteObject"] }
+#   - { name: reader, actions: ["s3:ListBucket","s3:GetObject"] }
+
+# Day-2 gates, all default off. Flip one on for a single run, then back off.
+# rgw_tenants_rotate_keys: true     # roll every tenant's account-root key to the vaulted value
+# rgw_tenants_prune_roles: true     # delete $name-$tier roles whose tier you removed from the tiers list
+
+# One entry per tenant. Pick account_id ("RGW" + 17 digits) once and never change it: a changed id is a
+# new account to the next converge, and the old one stays behind. Each entry gets an account, an
+# account-root user (uid "${name}root" unless root_user overrides), a registered OIDC provider,
+# $name-$tier roles, and the listed buckets. quota (storage) and limits (users/buckets) are optional:
+# edit and re-run to move them. max_size is in BYTES or -1; let Jinja do the arithmetic.
+rgw_tenants_list:
+  - name: acme
+    account_id: "RGW00000000000000001"
+    buckets: ["acme-data", "acme-logs", "acme-backups"]
+    quota:
+      enabled: true
+      max_size: "{{ 500 * 1024 ** 3 }}" # 500 GiB
+      max_objects: -1                    # no object-count cap
+    limits:
+      max_users: 20                      # cap account users (-1 = unlimited)
+      max_buckets: 50                    # cap account buckets (-1 = unlimited)
+    # rotate_keys: true                  # roll THIS tenant's key once (also needs the vault key changed)
+  - name: globex
+    account_id: "RGW00000000000000002"
+    buckets: ["globex-data", "globex-logs"]
+    # quota: omitted -> unlimited
+    # limits: omitted -> RGW account defaults
+    # root_user: globexadmin           # optional override
+    # bucket_prefix: "globex-"         # optional; defaults to "$name-"
+
+  # Decommission: keep the entry with state: absent (and its vault keys) until the run reports all OK,
+  # then delete both. A non-empty bucket also needs purge_objects plus -e rgw_tenants_allow_purge=true.
+  # - name: initech
+  #   account_id: "RGW00000000000000003"
+  #   state: absent
+  #   buckets: ["initech-data"]        # listed so they get removed
+  #   purge_objects: true              # only if the buckets still hold data (destructive)
