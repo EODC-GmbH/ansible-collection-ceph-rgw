@@ -1,0 +1,19 @@
+---
+# Squid has no working `radosgw-admin oidc-provider`, so this goes through the IAM API as
+# each tenant's account-root: a provider is scoped to the calling account.
+- name: Register the OIDC provider in each tenant account
+  underknowledge.ceph_rgw.rgw_oidc_provider:
+    url: "{{ rgw_tenants_oidc.provider_url }}"
+    client_ids: "{{ rgw_tenants_oidc.client_ids }}"
+    thumbprints: "{{ rgw_tenants_oidc.thumbprints }}"
+    endpoint_url: "{{ rgw_tenants_endpoint }}"
+    validate_certs: "{{ rgw_tenants_validate_certs }}"
+    ca_bundle: "{{ rgw_tenants_ca_bundle | default(omit, true) }}"
+    region: "{{ rgw_tenants_s3_region }}"
+    access_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_access_key') }}"
+    secret_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_secret_key') }}"
+  loop: "{{ _rgw_tenants_present }}"
+  loop_control:
+    label: "{{ item.name }} ({{ item.account_id }})"
+  notify: Restart RGW for OIDC
+  when: inventory_hostname == rgw_tenants_bootstrap_host

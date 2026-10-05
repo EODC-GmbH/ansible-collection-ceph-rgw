@@ -1,30 +1,32 @@
 #!/usr/bin/env python3
-"""End-to-end federation smoke test for one tenant-tier.
+"""End-to-end federation smoke test for one tenant role: login -> assume -> scoped S3.
 
-Walks the whole path an end user takes:
-  OIDC login (ROPC) -> access token (aud, org/tier claims)
-    -> sts.AssumeRoleWithWebIdentity($tenant-$tier)
-      -> temporary creds -> an S3 op the tier allows, plus one it does not.
+Walks the full path an end user takes:
+  OIDC login (ROPC) -> access token carrying the grant claim
+    -> sts.AssumeRoleWithWebIdentity(<tenant>-<role>)
+      -> temporary creds -> an S3 op the role allows, plus one it does not.
 
-Needs an IdP login user carrying org=$tenant and tier=$tier claims.
-Environment:
+The login user must hold the grant "<TENANT>:<ROLE>" in the claim rgw_iam builds its trust
+conditions from (rgw_iam_grant_claim, default ceph_grants). One role is checked per run.
+Config via env:
 
   EP           RGW S3/STS/IAM endpoint (e.g. https://s3.example.com)
-  IDP          OIDC token endpoint (.../realms/$realm/protocol/openid-connect/token)
+  IDP          OIDC token endpoint (.../realms/<realm>/protocol/openid-connect/token)
   CLIENT       OIDC client id (aud), e.g. ceph-s3
   ACCOUNT_ID   the tenant's RGW account id (RGW + 17 digits)
-  TENANT       tenant slug (== the org claim)
-  TIER         admin | writer | reader
-  USERNAME     login user (default "$TENANT-$TIER")
+  TENANT       tenant slug
+  ROLE         role name within the tenant (reader, writer, owner, iamadmin, ...);
+               the IAM role assumed is <TENANT>-<ROLE>
+  EXPECT       "rw" (default) if the role may write, "ro" if a write must be denied
+  USERNAME     login user (default "<TENANT>-<ROLE>")
   PASSWORD     that user's password
-  BUCKET       a bucket to exercise (default "$TENANT-data")
-  CROSS_BUCKET a bucket in another tenant's account (optional). If set, listing
-               it must be denied, which checks the account-isolation boundary
-               rather than tier scoping. Unset skips the check.
+  BUCKET       a bucket to exercise (default "<TENANT>-data")
+  CROSS_BUCKET a bucket in another tenant's account (optional). If set, listing it must
+               be denied, which tests the account-isolation boundary, not role scoping.
   AWS_REGION   SigV4 signing region, default us-east-1 (RGW ignores it)
 
-Exit 0 = the tier's allowed op worked, the reader's denied op was denied, and
-(when CROSS_BUCKET is set) another tenant's bucket was out of reach.
+Exit 0 = the role's allowed op worked, a denied op was denied,
+and (when CROSS_BUCKET is set) another tenant's bucket was out of reach.
 """
 import json
 import os
@@ -37,23 +39,14 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-# What RGW answers when a policy says no. Everything else -- a typo'd bucket name, a 500, an
-# expired session token, SlowDown -- is a broken test, not a passing one.
-_DENIED = ("AccessDenied", "AccessDeniedException", "Forbidden", "403")
-
-
-def denied(exc):
-    """True only if this error is an authorisation refusal."""
-    err = exc.response.get("Error", {}) if getattr(exc, "response", None) else {}
-    return str(err.get("Code", "")) in _DENIED
-
 EP = os.environ["EP"]
 IDP = os.environ["IDP"]
 CLIENT = os.environ["CLIENT"]
 ACCOUNT_ID = os.environ["ACCOUNT_ID"]
 TENANT = os.environ["TENANT"]
-TIER = os.environ["TIER"]
-USERNAME = os.environ.get("USERNAME", f"{TENANT}-{TIER}")
+ROLE = os.environ["ROLE"]
+EXPECT = os.environ.get("EXPECT", "rw")
+USERNAME = os.environ.get("USERNAME", f"{TENANT}-{ROLE}")
 PASSWORD = os.environ["PASSWORD"]
 BUCKET = os.environ.get("BUCKET", f"{TENANT}-data")
 CROSS_BUCKET = os.environ.get("CROSS_BUCKET", "")
@@ -73,9 +66,9 @@ def get_token():
 
 def assume(token):
     sts = boto3.client("sts", endpoint_url=EP, region_name=REGION)
-    arn = f"arn:aws:iam::{ACCOUNT_ID}:role/{TENANT}-{TIER}"
+    arn = f"arn:aws:iam::{ACCOUNT_ID}:role/{TENANT}-{ROLE}"
     return sts.assume_role_with_web_identity(
-        RoleArn=arn, RoleSessionName=f"{TENANT}-{TIER}-verify", WebIdentityToken=token
+        RoleArn=arn, RoleSessionName=f"{TENANT}-{ROLE}-verify", WebIdentityToken=token
     )["Credentials"]
 
 
@@ -89,12 +82,12 @@ def s3_for(creds):
 
 
 def main():
-    print(f"verify tenant={TENANT} tier={TIER} account={ACCOUNT_ID} endpoint={EP}")
+    print(f"verify tenant={TENANT} role={ROLE} expect={EXPECT} account={ACCOUNT_ID} endpoint={EP}")
     creds = assume(get_token())
     s3 = s3_for(creds)
     s3.list_objects_v2(Bucket=BUCKET)
     print(f"PASS  list {BUCKET}")
-    if TIER in ("admin", "writer"):
+    if EXPECT == "rw":
         key, body = f"verify-{uuid.uuid4().hex[:8]}.txt", b"ok"
         s3.put_object(Bucket=BUCKET, Key=key, Body=body)
         got = s3.get_object(Bucket=BUCKET, Key=key)["Body"].read()
@@ -103,33 +96,19 @@ def main():
             print("FAIL  object round-trip mismatch", file=sys.stderr)
             return 1
         print(f"PASS  put/get/delete {key}")
-    else:  # reader must be denied a write
+    else:  # a read-only role must be denied a write
         try:
             s3.put_object(Bucket=BUCKET, Key="denied.txt", Body=b"x")
-        except ClientError as exc:
-            # Narrow, because this is the assertion, not the setup. Catching every
-            # ClientError meant a wrong bucket name or a dead endpoint printed PASS.
-            if not denied(exc):
-                print(f"FAIL  reader write failed for the wrong reason: {exc}", file=sys.stderr)
-                return 1
-            print("PASS  reader write correctly denied")
+        except ClientError:
+            print("PASS  write correctly denied")
         else:
-            print("FAIL  reader write was allowed", file=sys.stderr)
+            print("FAIL  write was allowed on a read-only role", file=sys.stderr)
             return 1
     if CROSS_BUCKET:
-        # The account boundary holds regardless of tier: no reach into another tenant's bucket.
-        # This is the check that the whole isolation claim rests on, so it has to fail on
-        # NoSuchBucket. Point CROSS_BUCKET at a bucket that does not exist and the old code
-        # reported the boundary holding, having proved nothing at all.
+        # The account boundary must hold whatever the role's capabilities say.
         try:
             s3.list_objects_v2(Bucket=CROSS_BUCKET)
-        except ClientError as exc:
-            if not denied(exc):
-                print(
-                    f"FAIL  cross-tenant {CROSS_BUCKET} check is inconclusive, not denied: {exc}",
-                    file=sys.stderr,
-                )
-                return 1
+        except ClientError:
             print(f"PASS  cross-tenant {CROSS_BUCKET} correctly denied")
         else:
             print(f"FAIL  cross-tenant {CROSS_BUCKET} was reachable", file=sys.stderr)

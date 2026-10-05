@@ -1,115 +1,46 @@
 ---
-# Read-only verification, no IdP and no user password needed: asserts every tenant's per-tier roles and
-# declared buckets exist, then prints desired-vs-live quota. Invoke with tasks_from=verify.
+# Read-only check of each tenant's account, buckets and quota. Run with tasks_from=verify.
+# IAM roles are checked by rgw_iam under --check.
 - name: Load the tenant drop-ins
   ansible.builtin.include_tasks: load_tenants.yml
 
-- name: Verify the tenants on the bootstrap host
+# One pass for the whole cluster: resolving bucket ownership costs a `bucket stats` per
+# bucket, so a per-tenant pass would rescan every bucket once per tenant.
+- name: List all RGW accounts with their buckets
+  underknowledge.ceph_rgw.rgw_account_info:
+    all: true
+    buckets: true
+    fsid: "{{ rgw_tenants_fsid | default(omit, true) }}"
+  register: _rgw_verify
+  become: true
+  when:
+    - rgw_tenants_list | length > 0
+    - inventory_hostname == rgw_tenants_bootstrap_host
+
+- name: Report each tenant, desired vs live
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.name }} ({{ item.account_id }}):
+      {{ 'ACCOUNT MISSING' if _live is none else '' }}
+      buckets desired={{ item.buckets | default([]) | sort }}
+      live={{ _live.buckets | default([]) | sort }}
+      {{ 'MISSING=' ~ _missing if _missing else '' }};
+      quota desired={{ item.quota | default({}, true) or 'unset' }}
+      live={{ _live.quota | default({}) }}
+  vars:
+    _live: "{{ (_rgw_verify.accounts | selectattr('id', 'equalto', item.account_id) | list | first) | default(none, true) }}"
+    _missing: "{{ item.buckets | default([]) | reject('in', _live.buckets | default([])) | list }}"
+  loop: "{{ rgw_tenants_list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - rgw_tenants_list | length > 0
+    - inventory_hostname == rgw_tenants_bootstrap_host
+
+- name: Report verification summary
+  ansible.builtin.debug:
+    msg: >-
+      {{ rgw_tenants_list | length }} tenant(s) compared against the cluster. Check IAM
+      roles with rgw_iam under --check, and the federation path with
+      files/verify_federation.py.
   when: inventory_hostname == rgw_tenants_bootstrap_host
-  block:
-    # Entered with tasks_from=verify, which never runs main.yml -- so this needs its own
-    # gate. Everything below is squid-only surface (`role list --account-id`, `bucket list
-    # --account-id`, `account get --account-id`), and on a pre-squid cluster those exit
-    # non-zero for an unrecognised argument, which the regex asserts here read as an absent
-    # role rather than a broken command. Verification is exactly what an operator reaches
-    # for when unsure what the cluster is, so it is the worst place to leave ungated.
-    - name: Check the cluster runs a Ceph this role supports
-      ansible.builtin.include_tasks: preflight.yml
-      when: rgw_tenants_ceph_version_check | bool
-
-    - name: List each tenant's IAM roles
-      ansible.builtin.command: >-
-        cephadm shell -- radosgw-admin role list --account-id={{ item.account_id | quote }}
-      loop: "{{ rgw_tenants_list }}"
-      loop_control:
-        label: "{{ item.name }} ({{ item.account_id }})"
-      register: rgw_tenants_verify_roles
-      changed_when: false
-      become: true
-
-    - name: Assert every tenant-tier role is present
-      ansible.builtin.assert:
-        quiet: true
-        that:
-          # Whole-token match, so a shorter name (acme-read) cannot satisfy a longer one (acme-reader).
-          - >-
-            rgw_tenants_tiers | map(attribute='name')
-            | map('regex_replace', '^', role.item.name ~ '-')
-            | reject('in', role.stdout | regex_findall('[A-Za-z0-9_-]+'))
-            | list | length == 0
-        fail_msg: >-
-          tenant '{{ role.item.name }}' ({{ role.item.account_id }}) is missing one or more
-          tier roles ({{ rgw_tenants_tiers | map(attribute='name') | join('/') }}).
-      loop: "{{ rgw_tenants_verify_roles.results }}"
-      loop_control:
-        loop_var: role
-        label: "{{ role.item.name }}"
-
-    - name: List each tenant's buckets
-      ansible.builtin.command: >-
-        cephadm shell -- radosgw-admin bucket list --account-id={{ item.account_id | quote }}
-      loop: "{{ rgw_tenants_list }}"
-      loop_control:
-        label: "{{ item.name }}"
-      register: rgw_tenants_verify_buckets
-      changed_when: false
-      become: true
-      when: item.buckets | default([]) | length > 0
-
-    - name: Assert every declared bucket is present
-      ansible.builtin.assert:
-        quiet: true
-        that:
-          # Whole-token match, as for the roles above, so acme-data cannot satisfy acme-data-archive.
-          - >-
-            bucket.item.buckets
-            | reject('in', bucket.stdout | regex_findall('[A-Za-z0-9_.-]+'))
-            | list | length == 0
-        fail_msg: >-
-          tenant '{{ bucket.item.name }}' ({{ bucket.item.account_id }}) is missing bucket(s)
-          {{ bucket.item.buckets | reject('in', bucket.stdout | regex_findall('[A-Za-z0-9_.-]+')) | list }}.
-      loop: "{{ rgw_tenants_verify_buckets.results | default([]) }}"
-      loop_control:
-        loop_var: bucket
-        label: "{{ bucket.item.name }}"
-      when: not (bucket.skipped | default(false))
-
-    - name: Show each quota'd tenant's current account cap
-      ansible.builtin.command: >-
-        cephadm shell -- radosgw-admin account get --account-id={{ item.account_id | quote }}
-      loop: "{{ rgw_tenants_list }}"
-      loop_control:
-        label: "{{ item.name }}"
-      register: rgw_tenants_verify_quota
-      changed_when: false
-      become: true
-      when: item.quota is defined
-
-    - name: Report each quota (desired vs live)
-      ansible.builtin.debug:
-        msg: >-
-          {{ q.item.name }}: desired size={{ q.item.quota.max_size | default(-1) }}
-          objs={{ q.item.quota.max_objects | default(-1) }}
-          ({{ 'on' if (q.item.quota.enabled | default(false)) else 'off' }}) vs
-          live {{ (q.stdout | underknowledge.ceph_rgw.ceph_json).quota | default({}) }}
-      loop: "{{ rgw_tenants_verify_quota.results | default([]) }}"
-      loop_control:
-        loop_var: q
-        label: "{{ q.item.name }}"
-      when: q.skipped | default(false) is false
-
-    # An empty list here means no tenants configured and nothing found in rgw_tenants_dir. Say so,
-    # instead of reporting a pass that asserted nothing.
-    - name: Report verification summary
-      ansible.builtin.debug:
-        msg: "{{ _rgw_nothing if rgw_tenants_list | length == 0 else _rgw_verified }}"
-      vars:
-        _rgw_nothing: >-
-          NOTHING VERIFIED: rgw_tenants_list is empty
-          {{ 'and rgw_tenants_dir is unset' if rgw_tenants_dir | length == 0
-             else 'after loading drop-ins from ' ~ rgw_tenants_dir }}
-        _rgw_verified: >-
-          {{ rgw_tenants_list | length }} tenant(s) verified: accounts, per-tier roles and
-          declared buckets present. For the full login -> assume -> S3 path, run
-          files/verify_federation.py per user.
-      run_once: true

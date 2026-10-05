@@ -1,310 +1,67 @@
 ---
-# Policy docs go in /var/run/ceph/$fsid/. That's all `cephadm shell` mounts, so pass
-# radosgw-admin the basename — give it the host path and it silently reads nothing.
-# Values below reach bash as positional params through argv, never interpolated into a shell
-# string. That is why there is no `| quote`. Don't "simplify" it into one.
-- name: Configure native RGW STS on the bootstrap host
+# secret_value is no_log in the module's argument spec and redacted from Ceph's output,
+# so a failure still shows Ceph's message. `ceph config set` takes the value only on argv,
+# so it is briefly visible in `ps` on the mon; mount /proc with hidepid=2 there.
+- name: Set the STS signing key
+  underknowledge.ceph_rgw.rgw_config:
+    option: rgw_sts_key
+    secret_value: "{{ rgw_sts_key }}"
+    fsid: "{{ rgw_sts_fsid | default(omit, true) }}"
+  notify: Restart RGW
+  become: true
+  when:
+    - rgw_sts_key | length > 0
+    - inventory_hostname == rgw_sts_bootstrap_host
+
+# Without a key, RGW signs session tokens with its public default "sts".
+- name: Assert an STS signing key is set
+  ansible.builtin.assert:
+    quiet: true
+    that: rgw_sts_key | length > 0
+    fail_msg: >-
+      Refusing to enable rgw_s3_auth_use_sts while rgw_sts_key is unset: RGW would sign STS
+      session tokens with Ceph's well-known default key "sts", making them forgeable. Set
+      rgw_sts_key from vault_rgw_sts_key (16+ random chars) and re-run.
   when: inventory_hostname == rgw_sts_bootstrap_host
-  block:
-    - name: Check the cluster runs a Ceph this role supports
-      ansible.builtin.include_tasks: preflight.yml
-      when: rgw_sts_ceph_version_check | bool
 
-    - name: Discover the cluster fsid
-      ansible.builtin.command: cephadm shell -- ceph fsid
-      when: rgw_sts_fsid | length == 0
-      become: true
-      register: rgw_sts_fsid_current
-      changed_when: false
-      check_mode: false
+- name: Enable STS auth
+  underknowledge.ceph_rgw.rgw_config:
+    option: rgw_s3_auth_use_sts
+    value: "true"
+    fsid: "{{ rgw_sts_fsid | default(omit, true) }}"
+  notify: Restart RGW
+  become: true
+  when: inventory_hostname == rgw_sts_bootstrap_host
 
-    # ceph_fsid, not raw stdout: `cephadm shell` prepends its own inference lines, and this
-    # value becomes a directory component below. A multi-line one does not fail -- it builds
-    # paths nothing reads, and radosgw-admin then gets handed an empty policy document.
-    - name: Set the fsid fact
-      ansible.builtin.set_fact:
-        _rgw_sts_fsid: "{{ (rgw_sts_fsid if rgw_sts_fsid | length > 0 else rgw_sts_fsid_current.stdout) | underknowledge.ceph_rgw.ceph_fsid }}"
+# rgw_role addresses a role only within an account, so fail here with the reason rather
+# than mid-loop.
+- name: Assert every STS role names an account
+  ansible.builtin.assert:
+    quiet: true
+    that: rgw_sts_roles | map(attribute='account_id', default='') | select('equalto', '') | list | length == 0
+    fail_msg: >-
+      rgw_sts_roles entries {{ _rgw_sts_unscoped }} have no account_id. Every role must be
+      scoped to an RGW account: give each one the account_id its ARN carries
+      (arn:aws:iam::<account_id>:role/<name>).
+  vars:
+    _rgw_sts_unscoped: >-
+      {{ rgw_sts_roles | rejectattr('account_id', 'defined') | map(attribute='name') | list
+         + rgw_sts_roles | selectattr('account_id', 'defined')
+                         | selectattr('account_id', 'equalto', '')
+                         | map(attribute='name') | list }}
+  when: inventory_hostname == rgw_sts_bootstrap_host
 
-    # Anyone who can read /proc on the mon sees this key while the call runs: `ceph config set` takes no
-    # env, stdin or file input. Mount /proc with hidepid=2 there to narrow that down.
-    - name: Set the STS session-token signing key (rgw_sts_key)
-      ansible.builtin.command:
-        argv:
-          - cephadm
-          - shell
-          - --
-          - bash
-          - -c
-          - |
-            key=$1
-            # tail -n1: the value is the last line, anything ceph prints first is not it.
-            cur=$(ceph config get client.rgw rgw_sts_key | tail -n1)
-            if [ "$cur" != "$key" ]; then
-              # `&&`, not `;`. With a `;` a failed `config set` still printed CHANGED and
-              # exited 0, so the run reported a key it had not written and fired the restart.
-              ceph config set client.rgw rgw_sts_key "$key" && echo CHANGED
-            fi
-          - _
-          - "{{ rgw_sts_key }}"
-      register: rgw_sts_key_reg
-      changed_when: "'CHANGED' in rgw_sts_key_reg.stdout"
-      notify: Restart RGW
-      no_log: true
-      become: true
-      when: rgw_sts_key | length > 0
-
-    # Without this gate an unconfigured import enables STS auth signed with Ceph's well-known default key
-    # "sts" — forgeable session tokens. The task above is skipped while rgw_sts_key is empty.
-    - name: Assert a real STS signing key is set before enabling STS auth
-      ansible.builtin.assert:
-        quiet: true
-        that: rgw_sts_key | length > 0
-        fail_msg: >-
-          Refusing to enable rgw_s3_auth_use_sts while rgw_sts_key is unset: RGW would sign STS
-          session tokens with Ceph's well-known default key "sts". Set rgw_sts_key
-          (16+ random chars, from vault) and re-run.
-
-    - name: Enable STS auth on the S3 endpoint (rgw_s3_auth_use_sts)
-      ansible.builtin.command: >
-        cephadm shell -- bash -c
-        'cur=$(ceph config get client.rgw rgw_s3_auth_use_sts | tail -n1 | tr "[:upper:]" "[:lower:]");
-         case "$cur" in
-           true|1|on|yes) ;;
-           *) ceph config set client.rgw rgw_s3_auth_use_sts true && echo CHANGED ;;
-         esac'
-      register: rgw_sts_use_sts_reg
-      changed_when: "'CHANGED' in rgw_sts_use_sts_reg.stdout"
-      notify: Restart RGW
-      become: true
-
-    - name: Template STS role trust-policy documents
-      ansible.builtin.copy:
-        dest: "/var/run/ceph/{{ _rgw_sts_fsid }}/sts-trust-{{ item.name }}.json"
-        content: "{{ item.trust_policy | to_nice_json }}"
-        owner: root
-        group: root
-        mode: "0600"
-      loop: "{{ rgw_sts_roles }}"
-      loop_control:
-        label: "{{ item.name }}"
-      become: true
-
-    # Every entry must name an account. Leave account_id out and radosgw-admin creates a
-    # tenant-level role through its admin-only CreateRole/PutRolePolicy -- the interface
-    # tentacle deprecated and the V release removes. Scoping to an account is also the only
-    # thing that makes the role's ARN match what the trust policies here reference.
-    - name: Assert every rgw_sts_roles entry is scoped to an account
-      ansible.builtin.assert:
-        quiet: true
-        that: _rgw_sts_unscoped | length == 0
-        fail_msg: >-
-          rgw_sts_roles entries {{ _rgw_sts_unscoped }} have no account_id. Give each one the
-          account its ARN carries (arn:aws:iam::<account_id>:role/<name>). A role without an
-          account is tenant-level, which Ceph deprecated in tentacle and removes no sooner
-          than the V release; see docs/CEPH-VERSIONS.md.
-      vars:
-        _rgw_sts_unscoped: >-
-          {{ (rgw_sts_roles | rejectattr('account_id', 'defined') | map(attribute='name') | list)
-             + (rgw_sts_roles | selectattr('account_id', 'defined')
-                | selectattr('account_id', 'equalto', '') | map(attribute='name') | list) }}
-      when: rgw_sts_roles | length > 0
-
-    # `role create` accepts a trust policy and then has no way to change one, so an edited
-    # trust_policy was silently ignored for the life of the role. `role-trust-policy modify`
-    # is the only thing that updates it, and it updates in place: recreating the role would
-    # mint a new RoleId, invalidating every live session.
-    #
-    # Compare canonically. radosgw-admin re-serialises what it stores -- its own key order,
-    # its own separators, sometimes percent-encoded -- so a byte compare against a rendered
-    # file reports drift on every converge and rewrites a policy nobody touched.
-    - name: Ensure each STS IAM role exists with the configured trust policy
-      ansible.builtin.command:
-        argv:
-          - cephadm
-          - shell
-          - --
-          - bash
-          - -c
-          - |
-            set -eu
-            name=$1; acct=$2
-            want=/var/run/ceph/sts-trust-${name}.json
-            # A missing document is not an empty one. A command substitution that fails in an
-            # argument does not trip errexit, so without this `--assume-role-policy-doc="$(cat
-            # "$want")"` quietly becomes empty and radosgw-admin complains about an empty
-            # document, saying nothing about the file that was not there.
-            [ -s "$want" ] || { echo "trust policy $want is missing or empty" >&2; exit 1; }
-            canon='
-            import json, sys, urllib.parse
-            def canon(doc):
-                if isinstance(doc, (dict, list)):
-                    return json.dumps(doc, sort_keys=True)
-                try:
-                    return json.dumps(json.loads(str(doc)), sort_keys=True)
-                except ValueError:
-                    return json.dumps(json.loads(urllib.parse.unquote(str(doc))), sort_keys=True)
-            cur = json.load(open(sys.argv[1]))
-            # squid and later answer a flat PascalCase object. There is deliberately no
-            # `or "{}"` fallback: that reads a shape change as an empty trust policy, which
-            # compares unequal forever and rewrites the trust on every converge. An
-            # unrecognised shape has to raise.
-            if "AssumeRolePolicyDocument" not in cur:
-                sys.exit("unrecognised `role get` shape for %s, keys: %s" % (sys.argv[4], sorted(cur)))
-            # The role has to actually be in the account we asked for. --account-id is
-            # undocumented on this subcommand; if a build ever parses it and ignores it, the
-            # get above misses, the create below makes a TENANT-level role, and that is the
-            # interface Ceph removes at V -- created silently, by the code that exists to
-            # prevent it, reporting green. This is free: role get already returns AccountId.
-            have = cur.get("AccountId") or ""
-            if have != sys.argv[3]:
-                sys.exit("role %s reports account %r, expected %r: --account-id is not taking effect"
-                         % (sys.argv[4], have, sys.argv[3]))
-            print("drift" if canon(cur["AssumeRolePolicyDocument"]) != canon(open(sys.argv[2]).read()) else "same")
-            '
-            if err=$(radosgw-admin role get --role-name="$name" --account-id="$acct" 2>&1 >/tmp/rgw-role.json); then
-              # Take the verdict into a variable and insist on knowing it. Inlining this as
-              # `if [ "$(python3 ...)" = drift ]` swallows a crashing comparison: the
-              # substitution yields "", the test is false, and the task reports OK having
-              # compared nothing.
-              verdict=$(python3 -c "$canon" /tmp/rgw-role.json "$want" "$acct" "$name") \
-                || { echo "trust comparison failed for $name" >&2; exit 1; }
-              case "$verdict" in
-                drift)
-                  # `role-trust-policy modify` is the only spelling there has ever been. The
-                  # man page documents `role modify`, which is not in the command table of any
-                  # release; `role update` exists but sets --max-session-duration and nothing
-                  # else, so following that hint gets you exit 0 and an unchanged trust policy.
-                  # A failure here is therefore not a spelling to work around: the role went
-                  # away between get and modify, the account is wrong, or RGW rejected the
-                  # document as unparseable.
-                  radosgw-admin role-trust-policy modify --role-name="$name" --account-id="$acct" \
-                    --assume-role-policy-doc="$(cat "$want")" >/dev/null || {
-                      echo "role-trust-policy modify failed for $name" >&2
-                      exit 1
-                    }
-                  echo UPDATED-TRUST ;;
-                same) echo OK ;;
-                *) echo "unexpected trust comparison result for $name: $verdict" >&2; exit 1 ;;
-              esac
-            else
-              rc=$?
-              # "Absent" is one specific error, and the old match for it was far too wide.
-              # `No such file or directory` is only strerror(ENOENT): radosgw-admin prints it
-              # for a missing role and for an unreadable keyring or ceph.conf alike, so
-              # matching it reads a broken connection as an empty cluster and blunders into a
-              # create. Match the role-pool read failure by name instead. If a build words it
-              # differently this fails loudly with the stderr attached, which is the safe
-              # direction to be wrong in -- creating is not.
-              printf '%s\n' "$err" | grep -qE 'failed reading role name from Role pool|NoSuchEntity' \
-                || { echo "role get for $name failed (exit $rc), and this is not a recognised not-found:" >&2
-                     printf '%s\n' "$err" >&2; exit 1; }
-              # Explicitly guarded, not `&& echo CREATED`. errexit exempts the left side of
-              # `&&`, so that form only fails the task because `fi` happens to be the last
-              # statement in the script -- add one line after it and a failed create becomes
-              # exit 0, no output, changed: false.
-              radosgw-admin role create --role-name="$name" --account-id="$acct" \
-                --assume-role-policy-doc="$(cat "$want")" >/dev/null \
-                || { echo "role create failed for $name" >&2; exit 1; }
-              echo CREATED
-            fi
-          - _
-          - "{{ item.name }}"
-          - "{{ item.account_id }}"
-      loop: "{{ rgw_sts_roles }}"
-      loop_control:
-        label: "{{ item.name }}"
-      register: rgw_sts_role_reg
-      changed_when: "'CREATED' in rgw_sts_role_reg.stdout or 'UPDATED-TRUST' in rgw_sts_role_reg.stdout"
-      become: true
-
-    - name: Template STS role permission-policy documents
-      ansible.builtin.copy:
-        # Hashed, not "$role-$policy": role `a-b` policy `c` and role `a` policy `b-c` both
-        # render to sts-perm-a-b-c.json, so one silently overwrites the other and each role
-        # gets compared and put with the wrong document.
-        dest: "/var/run/ceph/{{ _rgw_sts_fsid }}/sts-perm-{{ (item.0.name ~ '/' ~ item.1.name) | hash('sha1') }}.json"
-        content: "{{ item.1.document | to_nice_json }}"
-        owner: root
-        group: root
-        mode: "0600"
-      loop: "{{ rgw_sts_roles | subelements('policies') }}"
-      loop_control:
-        label: "{{ item.0.name }}/{{ item.1.name }}"
-      become: true
-
-    # `role-policy put` always overwrites, so putting blind reports changed on every converge.
-    # The old diff here compared the rendered file to `role-policy get` byte for byte, which
-    # cannot ever match: role-policy get answers {"Permission policy": "$document"} -- the
-    # document wrapped in an envelope, as a string. So the compare was always unequal, every
-    # converge re-put every policy, and the role reported changed forever while changing
-    # nothing. Unwrap, then compare canonically.
-    - name: Attach permission policies to STS roles
-      ansible.builtin.command:
-        argv:
-          - cephadm
-          - shell
-          - --
-          - bash
-          - -c
-          - |
-            set -eu
-            name=$1; acct=$2; pol=$3; want=$4
-            # A missing document is not an empty one -- see the trust task.
-            [ -s "$want" ] || { echo "permission policy $want is missing or empty" >&2; exit 1; }
-            canon='
-            import json, sys, urllib.parse
-            def canon(doc):
-                if isinstance(doc, (dict, list)):
-                    return json.dumps(doc, sort_keys=True)
-                try:
-                    return json.dumps(json.loads(str(doc)), sort_keys=True)
-                except ValueError:
-                    return json.dumps(json.loads(urllib.parse.unquote(str(doc))), sort_keys=True)
-            raw = open(sys.argv[1]).read().strip()
-            if not raw:
-                print("drift")
-                sys.exit(0)
-            doc = json.loads(raw)
-            # Unwrap the envelope, but only when it is an envelope: a single-key object that
-            # is not itself a policy document. A build that answers with the bare document
-            # then still compares correctly.
-            if isinstance(doc, dict) and len(doc) == 1 and not ({"Version", "Statement"} & set(doc)):
-                doc = list(doc.values())[0]
-            print("drift" if canon(doc) != canon(open(sys.argv[2]).read()) else "same")
-            '
-            if err=$(radosgw-admin role-policy get --role-name="$name" --account-id="$acct" \
-                       --policy-name="$pol" 2>&1 >/tmp/rgw-policy.json); then
-              :
-            else
-              rc=$?
-              # Same rule, and the same narrowing, as the role probe: a bare ENOENT is also
-              # what an unreadable keyring looks like, and reading that as "no policy yet"
-              # re-puts a policy against a cluster that never answered.
-              printf '%s\n' "$err" | grep -qE 'failed reading role name from Role pool|[Pp]olicy name.*not found|NoSuchEntity' \
-                || { echo "role-policy get for $name/$pol failed (exit $rc), and this is not a recognised not-found:" >&2
-                     printf '%s\n' "$err" >&2; exit 1; }
-              : > /tmp/rgw-policy.json
-            fi
-            # Same rule as the trust compare: a crashing comparison must not read as "no
-            # drift" and leave the policy silently unwritten.
-            verdict=$(python3 -c "$canon" /tmp/rgw-policy.json "$want") \
-              || { echo "policy comparison failed for $name/$pol" >&2; exit 1; }
-            case "$verdict" in
-              drift)
-                radosgw-admin role-policy put --role-name="$name" --account-id="$acct" --policy-name="$pol" \
-                  --policy-doc="$(cat "$want")" >/dev/null || { echo "role-policy put failed for $name/$pol" >&2; exit 1; }
-                echo PUT ;;
-              same) ;;
-              *) echo "unexpected policy comparison result for $name/$pol: $verdict" >&2; exit 1 ;;
-            esac
-          - _
-          - "{{ item.0.name }}"
-          - "{{ item.0.account_id }}"
-          - "{{ item.1.name }}"
-          - "/var/run/ceph/sts-perm-{{ (item.0.name ~ '/' ~ item.1.name) | hash('sha1') }}.json"
-      loop: "{{ rgw_sts_roles | subelements('policies') }}"
-      loop_control:
-        label: "{{ item.0.name }}/{{ item.1.name }}"
-      register: rgw_sts_role_policy_reg
-      changed_when: "'PUT' in rgw_sts_role_policy_reg.stdout"
-      become: true
+# policies is authoritative: purge_policies defaults true, so a policy dropped from config
+# is deleted from the role.
+- name: Reconcile the STS roles
+  underknowledge.ceph_rgw.rgw_role:
+    name: "{{ item.name }}"
+    account_id: "{{ item.account_id }}"
+    assume_role_policy_document: "{{ item.trust_policy }}"
+    policies: "{{ item.policies }}"
+    fsid: "{{ rgw_sts_fsid | default(omit, true) }}"
+  loop: "{{ rgw_sts_roles }}"
+  loop_control:
+    label: "{{ item.name }}"
+  become: true
+  when: inventory_hostname == rgw_sts_bootstrap_host

@@ -1,0 +1,36 @@
+---
+# Plain account users with static keys. uid == display name, because IAM resolves
+# UserName against the display name and rgw_iam puts the policy by it. A new user is
+# denied everything until rgw_iam puts its policy.
+- name: Ensure each declared service user exists
+  underknowledge.ceph_rgw.rgw_account_user:
+    uid: "{{ item.1.name | underknowledge.ceph_rgw.rgw_service_user_name(item.0.name) }}"
+    account_id: "{{ item.0.account_id }}"
+    account_root: false
+    access_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.0.name | replace('-', '_')) ~ '_svc_' ~ item.1.name ~ '_access_key') }}"
+    secret_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.0.name | replace('-', '_')) ~ '_svc_' ~ item.1.name ~ '_secret_key') }}"
+    rotate_keys: "{{ (rgw_tenants_rotate_keys | default(false) | bool) or (item.0.rotate_keys | default(false) | bool) }}"
+    suspended: "{{ item.1.suspended | default(false) | bool }}"
+    fsid: "{{ rgw_tenants_fsid | default(omit, true) }}"
+  loop: "{{ _rgw_tenants_present | subelements('users', skip_missing=true) }}"
+  loop_control:
+    label: "{{ item.1.name | underknowledge.ceph_rgw.rgw_service_user_name(item.0.name) }}"
+  become: true
+  when:
+    - (item.1.state | default('present')) != 'absent'
+    - inventory_hostname == rgw_tenants_bootstrap_host
+
+- name: Remove absent service users
+  underknowledge.ceph_rgw.rgw_account_user:
+    uid: "{{ item.1.name | underknowledge.ceph_rgw.rgw_service_user_name(item.0.name) }}"
+    account_id: "{{ item.0.account_id }}"
+    account_root: false
+    state: absent
+    fsid: "{{ rgw_tenants_fsid | default(omit, true) }}"
+  loop: "{{ _rgw_tenants_present | subelements('users', skip_missing=true) }}"
+  loop_control:
+    label: "{{ item.1.name | underknowledge.ceph_rgw.rgw_service_user_name(item.0.name) }}"
+  become: true
+  when:
+    - (item.1.state | default('present')) == 'absent'
+    - inventory_hostname == rgw_tenants_bootstrap_host

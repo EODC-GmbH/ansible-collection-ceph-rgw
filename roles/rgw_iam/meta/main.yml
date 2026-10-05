@@ -1,0 +1,26 @@
+---
+galaxy_info:
+  role_name: rgw_iam
+  namespace: underknowledge
+  author: Underknowledge
+  description: Reconcile the per-tenant IAM roles federated users assume, from a grant catalogue.
+  license: Apache-2.0
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+    - name: EL
+      versions:
+        - "9"
+  galaxy_tags:
+    - ceph
+    - rgw
+    - iam
+    - sts
+    - s3
+    - oidc
+# Ordering, not a dependency: rgw_sts, then rgw_tenants, then this, as separate plays. The
+# accounts and their OIDC providers must exist before a trust policy federates them.
+dependencies: []

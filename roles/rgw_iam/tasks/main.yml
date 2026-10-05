@@ -1,0 +1,121 @@
+---
+# Composition and the desired-vs-actual diff live in plugins/module_utils/rgw_iam.py and rgw_iam_reconcile.py.
+# The drop-ins are read here too so this role also runs without rgw_tenants.
+- name: Load tenant drop-ins
+  ansible.builtin.include_vars:
+    dir: "{{ rgw_iam_dir }}"
+    extensions: [yml, yaml]
+    # Otherwise a README or *.yml.sample in the directory aborts the run.
+    ignore_unknown_extensions: true
+  when: rgw_iam_dir | length > 0
+
+# lookup('vars') rather than map('extract', vars), which returns values untemplated.
+- name: Collect the drop-in tenants
+  ansible.builtin.set_fact:
+    _rgw_iam_dropins: "{{ (_rgw_iam_dropins | default([])) + [lookup('vars', item)] }}"
+  loop: "{{ query('ansible.builtin.varnames', '^rgw_tenant_[a-z0-9_]+$') | sort }}"
+  loop_control:
+    label: "{{ item }}"
+
+# Inline rgw_iam_tenants, rgw_tenants_list and the drop-ins overlap, so they are keyed by
+# name, last wins. Tenants marked state: absent are left to rgw_tenants teardown.
+- name: Assemble the tenant list
+  ansible.builtin.set_fact:
+    rgw_iam_tenants: >-
+      {{ (_rgw_iam_uniq | rejectattr('state', 'defined') | list)
+         + (_rgw_iam_uniq | selectattr('state', 'defined')
+                          | rejectattr('state', 'equalto', 'absent') | list) }}
+  vars:
+    _rgw_iam_seen: >-
+      {{ (rgw_iam_tenants | default([], true))
+         + (rgw_tenants_list | default([], true))
+         + (_rgw_iam_dropins | default([])) }}
+    _rgw_iam_uniq: "{{ dict(_rgw_iam_seen | map(attribute='name') | zip(_rgw_iam_seen)).values() | list }}"
+
+- name: Report that there is nothing to reconcile
+  ansible.builtin.debug:
+    msg: >-
+      No tenants found, so there are no IAM roles to reconcile. Set rgw_iam_dir to the
+      drop-in directory (it defaults to rgw_tenants_dir), or define rgw_tenants_list /
+      rgw_iam_tenants inline, if that is unexpected.
+  when: rgw_iam_tenants | length == 0
+
+- name: End the play when no tenants are defined
+  ansible.builtin.meta: end_play
+  when: rgw_iam_tenants | length == 0
+
+# The trust condition key is the token's iss minus its scheme. A trailing slash here
+# yields a key no token carries, and every assume fails with AccessDenied.
+- name: Assert the OIDC provider URL is set and has no trailing slash
+  ansible.builtin.assert:
+    that:
+      - rgw_iam_provider_url | length > 0
+      - not rgw_iam_provider_url.endswith('/')
+    fail_msg: >-
+      rgw_iam_provider_url is '{{ rgw_iam_provider_url }}'. It must be set and must not
+      end in a slash: RGW derives the trust condition key from the token's iss claim by
+      removing only the scheme, so an empty value or a trailing slash makes the key
+      unmatchable and every assume fails with a bare AccessDenied.
+    quiet: true
+
+- name: Build the desired IAM spec
+  ansible.builtin.set_fact:
+    _rgw_iam_spec: "{{ _rgw_iam_rendered if _rgw_iam_rendered is mapping else _rgw_iam_rendered | from_json }}"
+  vars:
+    _rgw_iam_rendered: "{{ lookup('ansible.builtin.template', 'iam-spec.json.j2') }}"
+
+- name: Reconcile IAM roles, policies and account limits
+  underknowledge.ceph_rgw.rgw_iam_sync:
+    spec: "{{ _rgw_iam_spec }}"
+    prune: "{{ rgw_iam_prune | bool }}"
+    fsid: "{{ rgw_iam_fsid | default(omit, true) }}"
+  check_mode: "{{ true if (rgw_iam_dry_run | bool) else omit }}"
+  register: rgw_iam_sync_reg
+  become: true
+  when: inventory_hostname == rgw_iam_bootstrap_host
+
+- name: Report what the reconciler did
+  ansible.builtin.debug:
+    msg: "{{ rgw_iam_sync_reg.actions | default([]) }}"
+  when: inventory_hostname == rgw_iam_bootstrap_host
+
+# Put through the IAM API: squid's radosgw-admin can only attach its six Resource "*"
+# managed policies to a user.
+- name: Compose service-user policies
+  ansible.builtin.set_fact:
+    _rgw_iam_users: "{{ _rgw_iam_spec | underknowledge.ceph_rgw.rgw_service_users }}"
+
+- name: Assert the IAM endpoint is set when service users are declared
+  ansible.builtin.assert:
+    that: rgw_iam_endpoint | length > 0
+    fail_msg: >-
+      Service users are declared, but rgw_iam_endpoint (default rgw_tenants_endpoint) is
+      empty. Their policies go through the IAM API, so it must be set.
+    quiet: true
+  when: _rgw_iam_users | length > 0
+
+- name: Reconcile service-user policies
+  underknowledge.ceph_rgw.rgw_user_policy:
+    user_name: "{{ item.name }}"
+    policy_name: "{{ rgw_iam_policy_name }}"
+    policy: "{{ item.policy }}"
+    prune: "{{ rgw_iam_prune | bool }}"
+    endpoint_url: "{{ rgw_iam_endpoint }}"
+    region: "{{ rgw_iam_s3_region }}"
+    validate_certs: "{{ rgw_iam_validate_certs | bool }}"
+    ca_bundle: "{{ rgw_iam_ca_bundle | default(omit, true) }}"
+    access_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.tenant | replace('-', '_')) ~ '_access_key') }}"
+    secret_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.tenant | replace('-', '_')) ~ '_secret_key') }}"
+  check_mode: "{{ true if (rgw_iam_dry_run | bool) else omit }}"
+  loop: "{{ _rgw_iam_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: rgw_iam_users_reg
+  when: inventory_hostname == rgw_iam_bootstrap_host
+
+- name: Report what the service-user reconcile did
+  ansible.builtin.debug:
+    msg: "{{ rgw_iam_users_reg.results | default([]) | map(attribute='actions', default=[]) | flatten }}"
+  when:
+    - _rgw_iam_users | length > 0
+    - inventory_hostname == rgw_iam_bootstrap_host

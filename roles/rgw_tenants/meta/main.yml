@@ -21,6 +21,6 @@ galaxy_info:
     - oidc
     - keycloak
     - multitenancy
-# rgw_sts must run first, in its own play, so its RGW restart lands between the two. Listing it as a
-# dependency would run it inline a second time instead; the cephadm play chain does the ordering.
+# rgw_sts must run first, as a separate play so its RGW restart lands between the two.
+# Left out of dependencies to avoid an inline double-run.
 dependencies: []

@@ -1,8 +1,7 @@
 ---
-# Read-only check of the tenant provisioning: asserts the per-tier roles and declared buckets, reports
-# quota. No IdP, no user password needed. Run it on demand; keep it out of the deploy chain:
-#   kayobe playbook run .../ansible/ceph/cephadm-tenants-verify.yml
-# For the full login -> assume -> S3 path, run roles/rgw_tenants/files/verify_federation.py per user.
+# Read-only check of accounts, buckets and quotas, run on demand. IAM roles are checked
+# by cephadm-iam.yml under --check, the federation path by
+# roles/rgw_tenants/files/verify_federation.py.
 - name: Verify Ceph RGW tenants
   gather_facts: false
   hosts: mons

@@ -1,0 +1,171 @@
+---
+# rgw_iam: the IAM roles a federated user assumes inside a tenant account. Run after
+# rgw_tenants, which creates the accounts and their OIDC providers.
+#
+# A user holds grants "<tenant>:<role>" in one multivalued OIDC claim; each grant selects
+# one IAM role in one account.
+
+# Host owning the cephadm bootstrap keyring; all radosgw-admin work runs there.
+rgw_iam_bootstrap_host: "{{ groups['mons'][0] }}"
+# Cluster fsid. Empty => read from /etc/ceph/ceph.conf.
+rgw_iam_fsid: ""
+
+# Drop-in tenant directory, the same one rgw_tenants loads, so this role also runs alone.
+# Tenants already in rgw_tenants_list are merged in by name.
+rgw_iam_dir: "{{ rgw_tenants_dir | default('') }}"
+rgw_iam_tenants: []
+
+# The OIDC issuer registered with each account by rgw_tenants. Must match the token's iss
+# exactly, without a trailing slash.
+rgw_iam_provider_url: "{{ rgw_tenants_oidc.provider_url | default('') }}"
+
+# The claim carrying a user's grants as "<tenant>:<role>" strings. The IdP must emit
+# exactly this name, or every assume fails with AccessDenied.
+rgw_iam_grant_claim: ceph_grants
+
+# Name of the inline policy this role puts on each platform role. Any other inline policy
+# on a platform role is reported (and removed under rgw_iam_prune).
+rgw_iam_policy_name: tenant
+
+# Namespace split inside a tenant's account:
+#   <tenant>-<role>          platform-managed, reconciled from config
+#   <tenant>-<infix>-<name>  tenant-managed, created at runtime; never touched here
+rgw_iam_delegated_infix: x
+
+# Assumed-session lifetime in seconds, 3600..43200. Sessions cannot be revoked, so this
+# is also the window a removed grant stays usable. Per tenant: session_duration.
+rgw_iam_session_duration: 3600
+
+# Per-account entity ceilings (max_users, max_roles, max_groups, max_buckets,
+# max_access_keys). RGW's defaults are 1000/1000/1000/1000/4, which is how far a tenant
+# holding iam-delegate can mint. {} leaves RGW's defaults alone; per tenant: limits.
+rgw_iam_account_limits:
+  max_roles: 100
+
+# IAM API endpoint and TLS settings for putting service users' inline policies, as each
+# tenant's account-root. Unused when no tenant declares users.
+rgw_iam_endpoint: "{{ rgw_tenants_endpoint | default('') }}"
+rgw_iam_s3_region: "{{ rgw_tenants_s3_region | default('us-east-1') }}"
+rgw_iam_validate_certs: "{{ rgw_tenants_validate_certs | default(true) }}"
+rgw_iam_ca_bundle: "{{ rgw_tenants_ca_bundle | default('') }}"
+
+# Deprecated alias for --check.
+rgw_iam_dry_run: false
+
+# Remove platform-namespace roles no longer in config and inline policies this role did
+# not put there, and rebuild a role tagged out of band. Never touches <tenant>-x-* roles.
+rgw_iam_prune: false
+
+# ---- Capabilities: named action bundles + the resource class they apply to -----
+# scope determines the resources generated:
+#   buckets        arn:aws:s3:::<bucket> and arn:aws:s3:::<bucket>/<prefix>
+#   account        "*": ListAllMyBuckets is checked against arn:aws:s3::<tenant>:*, which
+#                  only "*" reliably matches. RGW still answers only for the calling
+#                  account.
+#   delegated-iam  arn:aws:iam::<account>:role/<tenant>-<infix>-*
+#
+# Action names are RGW's, not AWS's, and one unrecognised name makes RGW discard the whole
+# policy. The list is the enum in src/rgw/rgw_iam_policy.h; on a host, ask the binary:
+#   strings /usr/bin/radosgw | grep -oE '^(s3|iam):[A-Za-z]+'
+rgw_iam_capabilities:
+  objects-read:
+    scope: buckets
+    actions:
+      - s3:ListBucket
+      - s3:ListBucketVersions
+      - s3:GetObject
+      - s3:GetObjectTagging
+  objects-write:
+    scope: buckets
+    actions:
+      - s3:PutObject
+      - s3:PutObjectTagging
+      - s3:DeleteObject
+      - s3:AbortMultipartUpload
+      - s3:ListBucketMultipartUploads
+      - s3:ListMultipartUploadParts
+  bucket-create:
+    scope: buckets
+    actions:
+      - s3:CreateBucket
+      - s3:DeleteBucket
+  bucket-policy-read:
+    # s3:PutBucketPolicy is in no bundle: a bucket policy is the only way to share across
+    # accounts. iam-delegate gets around this; see the note there.
+    scope: buckets
+    actions:
+      - s3:GetBucketPolicy
+  versioning:
+    scope: buckets
+    actions:
+      - s3:GetBucketVersioning
+      - s3:PutBucketVersioning
+  lifecycle:
+    scope: buckets
+    actions:
+      - s3:GetLifecycleConfiguration
+      - s3:PutLifecycleConfiguration
+  tagging:
+    scope: buckets
+    actions:
+      - s3:GetBucketTagging
+      - s3:PutBucketTagging
+  account-list:
+    scope: account
+    actions:
+      - s3:ListAllMyBuckets
+  iam-delegate:
+    # Account-wide authority. The resource prefix limits which roles the holder may
+    # create, not what their policies say, and RGW has no permissions boundary: a holder
+    # can create <tenant>-x-anything with s3:* and assume it. Other accounts stay out of
+    # reach.
+    #
+    # iam:AttachRolePolicy is left out: RGW's managed policies are all Resource "*".
+    # iam:ListRoles and iam:ListOIDCProviders cannot be granted to a role session at all:
+    # RGW never builds a candidate ARN for them, so no Resource pattern matches.
+    scope: delegated-iam
+    actions:
+      - iam:CreateRole
+      - iam:GetRole
+      - iam:DeleteRole
+      - iam:UpdateRole
+      - iam:ModifyRoleTrustPolicy   # RGW's name for iam:UpdateAssumeRolePolicy
+      - iam:PutRolePolicy
+      - iam:GetRolePolicy
+      - iam:ListRolePolicies
+      - iam:DeleteRolePolicy
+      - iam:TagRole
+
+# Granted to every role, so any role can list its tenant's buckets.
+rgw_iam_baseline_capabilities:
+  - account-list
+
+# ---- Role catalogue: every tenant gets one of each ------------------------------
+# A tenant can declare extra roles in its entry, composed from the same capabilities.
+rgw_iam_roles:
+  - name: reader
+    capabilities:
+      - objects-read
+  - name: writer
+    capabilities:
+      - objects-read
+      - objects-write
+  - name: owner
+    capabilities:
+      - objects-read
+      - objects-write
+      - bucket-create
+      - bucket-policy-read
+      - versioning
+      - lifecycle
+      - tagging
+  - name: iamadmin
+    capabilities:
+      - objects-read
+      - objects-write
+      - bucket-create
+      - bucket-policy-read
+      - versioning
+      - lifecycle
+      - tagging
+      - iam-delegate

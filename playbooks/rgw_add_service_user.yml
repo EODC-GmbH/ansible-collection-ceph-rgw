@@ -1,0 +1,17 @@
+---
+# Add one static-key service user to an existing tenant drop-in: generate keys for
+# iam-<tenant>-svc-<slug>, vault-encrypt them, and merge a `users:` entry plus its two
+# !vault blocks into the file. rgw_iam puts its policy. Touches no cluster.
+#
+#   ANSIBLE_VAULT_PASSWORD_FILE=~/.vault-pass \
+#   ansible-playbook playbooks/rgw_add_service_user.yml \
+#     -e rgw_add_root_user_tenant=initrode-data-prod -e rgw_add_root_user=backup \
+#     -e '{"rgw_add_service_user_capabilities": ["objects-read"]}'
+#
+# Inputs: the rgw_add_root_user_* variables, plus
+#   rgw_add_service_user_capabilities   rgw_iam capability names (default none). Scope to
+#                                       buckets/prefixes by editing the entry afterwards.
+- name: Add a service user to a tenant drop-in
+  ansible.builtin.import_playbook: rgw_add_root_user.yml
+  vars:
+    _ar_import_kind: svc

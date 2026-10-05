@@ -1,260 +1,419 @@
 # underknowledge.ceph_rgw
 
-Native Ceph RGW STS plus OIDC-federated, per-tenant S3 for
-kayobe / cephadm deployments. End users hold no long-lived S3 keys:
-they log in to an OIDC IdP and get short-lived, tenant- and
-tier-scoped S3 credentials via `AssumeRoleWithWebIdentity`.
-
-Two roles:
+Ansible collection for multi-tenant S3 with OIDC federation on a
+cephadm-deployed Ceph RGW. Each tenant is a separate RGW account. End users log
+in to an OIDC IdP and get short-lived, tenant- and role-scoped credentials
+through `AssumeRoleWithWebIdentity` instead of static S3 keys.
 
 | Role | What it does |
-|------|--------------|
-| `rgw_sts` | Enables native RGW STS. Sets `rgw_sts_key` and `rgw_s3_auth_use_sts`. Creates standalone account-scoped `AssumeRole` IAM roles. Restarts RGW on change. |
-| `rgw_tenants` | Per tenant: an RGW account, an account-root user (creates buckets, never handed out), a registered OIDC provider, per-tier web-identity IAM roles (`<tenant>-admin/writer/reader`), and buckets. Runs after `rgw_sts`. |
+|---|---|
+| [`rgw_sts`](roles/rgw_sts/README.md) | Enables native RGW STS: the session-token signing key, `rgw_s3_auth_use_sts`, and standalone `AssumeRole` / `GetSessionToken` roles. |
+| [`rgw_tenants`](roles/rgw_tenants/README.md) | Per tenant: an RGW account, its account-root user(s), static-key service users, storage quota, registered OIDC provider and buckets. |
+| [`rgw_iam`](roles/rgw_iam/README.md) | Reconciles the web-identity IAM roles `<tenant>-<role>` a federated user assumes inside those accounts, and the scoped inline policy of each service user. |
 
-## How a login turns into S3 access
+Run them in that order, as three separate plays. `rgw_tenants` asserts that
+`rgw_s3_auth_use_sts` is already true, and `rgw_iam`'s trust policies reference
+the OIDC providers `rgw_tenants` registers.
 
+## Prerequisites
+
+The collection does not configure these.
+
+- **Ceph squid (19.x) or newer.** Every tenant is an RGW account, and accounts
+  arrived in squid. The RGW behaviour described here was observed on 19.2.4.
+  The roles do not check the Ceph version.
+- **`rgw_enable_apis` must contain `sts`, `iam` and `accounts`.** Without
+  `accounts` the account and account-user calls fail. For example:
+  `ceph config set client.rgw rgw_enable_apis 's3, sts, iam, accounts, admin, notifications'`.
+  The value replaces the whole list, so keep any other API you serve
+  (`swift`, `swift_auth`, `s3website`).
+- **`radosgw-admin` reachable on the bootstrap host** (`groups['mons'][0]` by
+  default), natively, in a container, or through `cephadm shell` (slowest, tried
+  last).
+- **`boto3` importable by the Python that runs the modules** on the bootstrap
+  host. Only the OIDC-provider and bucket steps need it.
+- **TLS.** The boto3 steps verify `rgw_tenants_endpoint`'s certificate. A
+  public-CA certificate needs nothing; for a private CA set
+  `rgw_tenants_ca_bundle` to a PEM file on the bootstrap host.
+- **An IdP that emits the grant claim** (`ceph_grants` by default) as a
+  multivalued string claim, plus an audience the provider's `client_ids` list.
+  [`docs/KEYCLOAK-REALM.md`](docs/KEYCLOAK-REALM.md) sets up a Keycloak realm by hand.
+
+**Untested:** Keystone S3 auth (`rgw_s3_auth_use_keystone true`) and Swift on
+the same RGW. The collection does not touch Keystone, but it was only tested
+with Keystone auth off.
+
+## Install
+
+Either vendor it or install it with galaxy.
+
+**Vendored.** Kayobe puts `$KAYOBE_CONFIG_PATH/ansible/collections` on the
+collections path, so a copy there resolves by FQCN with no install step:
+
+```sh
+git clone https://github.com/EODC-GmbH/ansible-collection-ceph-rgw.git /tmp/ceph_rgw
+rsync -a --delete --exclude .git --exclude tests --exclude __pycache__ \
+  /tmp/ceph_rgw/ $KAYOBE_CONFIG_PATH/ansible/collections/ansible_collections/underknowledge/ceph_rgw/
 ```
-  user logs in to the OIDC IdP (realm, client "ceph-s3")
-      access token carries: iss, aud=ceph-s3, org=<tenant>, tier=<tier>
 
-  boto3 sts.assume_role_with_web_identity(RoleArn=<tenant>-<tier>, WebIdentityToken=token)
+Do not also list the collection in `requirements.yml`, or
+`kayobe control host bootstrap` installs a second copy.
 
-  RGW validates the token against the account's OIDC provider and matches the role
-  trust policy (Federated provider, <provider>:org == tenant, <provider>:tier == tier),
-  then returns temporary credentials scoped by the permission policy to
-  arn:aws:s3:::<tenant>-*
-
-  boto3 s3 with the temporary creds: only this tenant's buckets, only this tier's actions
-```
-
-Each tenant is a separate RGW account. A role in one account
-cannot reach another account's buckets. The per-tier permission policy
-narrows access within the account to a bucket-name prefix
-(`<tenant>-*` by default).
-
-"Tenant" here means one of these accounts, not an RGW *tenant*. They are
-different objects, and the difference is what decides whether this survives the
-next two Ceph releases: tentacle deprecated tenant-level IAM in favour of
-accounts, and `CreateRole`, `PutRolePolicy`, tenant names in policy documents
-and `sts:GetSessionToken` are all removed no sooner than the V release. Nothing
-here uses any of them. Both roles refuse to run on a Ceph older than squid and
-warn on one newer than they were tested against.
-
-**[docs/CEPH-VERSIONS.md](docs/CEPH-VERSIONS.md)** has the supported range, the
-reasoning behind each rule, where every deprecated call stands, what is still
-fragile, and how to re-check when a new Ceph lands. Read it before an upgrade.
-
-## Install (kayobe)
-
-Add it to `etc/kayobe/ansible/requirements.yml` under `collections:`
-(see [`examples/kayobe-config/ansible/requirements.yml.snippet`](examples/kayobe-config/ansible/requirements.yml.snippet)).
-Kayobe pulls it from git with `ansible-galaxy`, same as the cephadm collection:
+**Galaxy.** Add it to `etc/kayobe/ansible/requirements.yml` (see
+[`requirements.yml.snippet`](examples/kayobe-config/ansible/requirements.yml.snippet)),
+then run `kayobe control host bootstrap`:
 
 ```yaml
 collections:
-  - name: https://github.com/Underknowledge/ansible-collection-ceph-rgw.git
+  - name: https://github.com/EODC-GmbH/ansible-collection-ceph-rgw.git
     type: git
-    version: main        # pin to a tag or commit for production
+    version: main/2025.1   # or a tag/commit
 ```
 
-Then `kayobe control host bootstrap` installs it.
+Copy the three chain plays from
+[`examples/kayobe-config/ansible/ceph/`](examples/kayobe-config/ansible/ceph/)
+into `etc/kayobe/ansible/ceph/`, and append their `import_playbook` lines to
+`cephadm.yml` after `cephadm-commands-post.yml` (see
+[`cephadm.yml.snippet`](examples/kayobe-config/ansible/ceph/cephadm.yml.snippet)).
 
-## Wire into the cephadm chain
+## Minimum working configuration
 
-1. Copy the two chain plays into `etc/kayobe/ansible/ceph/`:
-   [`cephadm-sts.yml`](examples/kayobe-config/ansible/ceph/cephadm-sts.yml),
-   [`cephadm-tenants.yml`](examples/kayobe-config/ansible/ceph/cephadm-tenants.yml).
-2. Append the two `import_playbook` lines to `etc/kayobe/ansible/ceph/cephadm.yml`
-   after `cephadm-commands-post.yml`
-   (see [`cephadm.yml.snippet`](examples/kayobe-config/ansible/ceph/cephadm.yml.snippet)).
-   Order matters: STS after commands-post, tenants last.
-   `rgw_tenants` asserts at runtime that `rgw_s3_auth_use_sts` is already `true`.
-3. Add the config to your environment's `cephadm.yml` and vault
-   (see [`examples/kayobe-config/environments/example/`](examples/kayobe-config/environments/example/)).
-
-Run this part alone with `kayobe playbook run .../ansible/ceph/cephadm.yml --tags cephadm-sts`
-(then `--tags cephadm-tenants`). Each `cephadm shell` call takes roughly 12s.
-A full tenant set is around 30 calls. Allow a timeout of ten minutes or more.
-
-## Configuration
-
-Every knob is a variable; each role's `defaults/main.yml` plus its
-`meta/argument_specs.yml` are the full list. Names are role-prefixed:
-`rgw_sts_*` for the STS role, `rgw_tenants_*` for the tenants role. Vaulted
-secrets take the same prefix (`vault_rgw_sts_*` / `vault_rgw_tenants_*`):
-
-- `rgw_sts_key` from `vault_rgw_sts_key`: STS signing key.
-- `rgw_tenants_endpoint`: RGW S3/IAM/STS endpoint the bootstrap host can reach.
-- `rgw_tenants_oidc`: `{ provider_url, client_ids, thumbprints }` for the IdP.
-- `rgw_tenants_list`: list of `{ name, account_id, buckets?, quota?, limits?, root_user?,
-  root_users?, bucket_prefix?, state? }`.
-- `rgw_tenants_tiers`: tier to actions (defaults admin/writer/reader).
-- `rgw_tenants_default_quota`: fallback `{ enabled, max_size, max_objects }`
-  applied to any tenant that omits its own `quota`. Default `{}` (no fallback).
-- `rgw_tenants_s3_region`: the region boto3 signs with, default `us-east-1`.
-  A SigV4 placeholder, not a cloud region: change it only if the zonegroup has
-  an `api_name`, or `CreateBucket` fails on the `LocationConstraint`.
-- `rgw_sts_service_name` / `rgw_tenants_service_name`: RGW cephadm service to
-  restart (per-role; both default to `rgw.rgw`).
-- Vault, per tenant: `vault_rgw_tenants_<name>_access_key` / `_secret_key`
-  (the primary account-root), plus
-  `vault_rgw_tenants_<name>_root_<slug>_access_key` / `_secret_key` for each extra root user.
-
-`name` must be lowercase `[a-z0-9][a-z0-9_]*` (snake_case account name, see *Naming conventions*).
-`account_id` must be `RGW` plus 17 digits. Every bucket must start
-with the tenant's prefix (`<name>-` by default). The role asserts all of this
-before touching the cluster.
-
-### Naming conventions
-
-Let the `rgw_new_tenant` and `rgw_add_root_user` playbooks build your
-identifiers; they run every name through the `ceph_naming` filters.
-A user ARN is `<account_id>:user/<display-name>`, so the filters feed one string
-to both — a uid that differs from its display-name is unaddressable from a policy
-that names the user. The per-tier trust policies match the federated provider
-rather than a user, so nothing here depends on it today:
-
-| Thing | Format | Example |
-|-------|--------|---------|
-| Account name | `<org>_<purpose>[_<qualifier>]`, lowercase snake_case | `initrode_data_prod`, `globex_data` |
-| Primary root | `iam-<account>-root` | `iam-initrode_data_prod-root` |
-| Extra root (service/person) | `iam-<account>-root-<descriptor>` | `iam-globex_data-root-backup`, `iam-initrode_data_prod-root-erika_schroeder` |
-| Group | `<account>-<role>` (no `iam-` prefix) | `globex_data-uploaders` |
-
-Person names are sanitized to the descriptor slug (German umlauts transliterated
-`ö→oe`/`ä→ae`/`ü→ue`/`ß→ss`, other diacritics stripped,
-spaces/hyphens folded to `_`), so `"Erika Schröder"` becomes `erika_schroeder`.
-Underscore joins words inside one semantic unit; hyphen separates the structural segments of a uid.
-
-Account names get the same sanitizing pass, then a validity check:
-`"Acme Data Prod"` and `Acme-Data-Prod` both canonicalize to `acme_data_prod`,
-and a single-word `acme` is rejected (a tenant needs at least two segments).
-The name is permanent: it drives the uid, vault key names, bucket prefix and
-role ARNs. The play warns whenever sanitizing changed your input; if the
-canonical form is not what you meant, re-run with the name you actually want.
-
-## Add a new tenant
-
-A tenant's identity and keys must be in config *before* `rgw_tenants` runs.
-The role never generates account-root keys and never writes anything back; the
-vault is authoritative. `rgw_new_tenant` mints that identity once and stops, and
-touches no cluster. Run it bare and it prompts for the account name, or pass the
-name with `-e` to skip the prompt:
-
-```sh
-# Uses your existing vault password (ANSIBLE_VAULT_PASSWORD_FILE, or -e
-# rgw_new_tenant_vault_password_file=<path>, e.g. kayobe's vault helper).
-ansible-playbook playbooks/rgw_new_tenant.yml -e rgw_new_tenant=initrode_web
-```
-
-It allocates an `account_id` (a Unix-time id: `RGW` + `date +%s%N` truncated to 17 digits,
-sortable; or pass `-e rgw_new_tenant_account_id=RGW<17 digits>`),
-mints an `IAM`-prefixed 20-char access key and a 40-char secret key
-from `random.SystemRandom`, and writes one self-contained drop-in file
-`<tenant>.yml` into `rgw_new_tenant_output_dir` (default `rgw_tenants.d`
-beside the playbook, not the directory you ran from).
-Every run emits the primary root `iam-<tenant>-root`:
+In `environments/<env>/cephadm.yml`:
 
 ```yaml
-# rgw_tenants.d/initrode_web.yml: config and vaulted keys, together
+rgw_sts_key: "{{ vault_rgw_sts_key }}"
+rgw_tenants_endpoint: "http://ceph-rgw.internal.example:8080"
+rgw_tenants_oidc:
+  provider_url: "https://idp.example.com/realms/myrealm"   # no trailing slash
+  client_ids: ["ceph-s3"]
+  thumbprints: ["<40-hex sha1 of the JWKS signing cert>"]  # see below
+rgw_tenants_list:
+  - name: acme
+    account_id: "RGW00000000000000001"
+    buckets: ["acme-data"]
+```
+
+In the vault: `vault_rgw_sts_key`, plus
+`vault_rgw_tenants_acme_access_key` / `_secret_key`. Then:
+
+```sh
+kayobe playbook run .../ansible/ceph/cephadm.yml --tags cephadm-sts
+kayobe playbook run .../ansible/ceph/cephadm.yml --tags cephadm-tenants
+kayobe playbook run .../ansible/ceph/cephadm.yml --tags cephadm-iam
+```
+
+That yields the account `acme`, its account-root user, the bucket `acme-data`,
+an OIDC provider inside the account, and the four IAM roles `acme-reader`,
+`acme-writer`, `acme-owner`, `acme-iamadmin`.
+
+## How a login becomes S3 access
+
+A user holds grants of the form `<tenant>:<role>` in one multivalued OIDC claim
+(`rgw_iam_grant_claim`, default `ceph_grants`). Each grant selects one IAM
+role in one account, so a single login can carry different roles in several
+tenants.
+
+```
+  user logs in to the OIDC IdP (realm, client "ceph-s3")
+      access token carries: iss, aud=ceph-s3,
+      ceph_grants=["acme:reader", "globex:owner", ...]
+
+  boto3 sts.assume_role_with_web_identity(
+      RoleArn=arn:aws:iam::<account_id>:role/<tenant>-<role>, WebIdentityToken=token)
+
+  RGW validates the token against that account's OIDC provider and matches the role
+  trust policy (Federated <account>:oidc-provider/<host>, and the condition
+  ForAnyValue:StringEquals on "<host>:ceph_grants" == "<tenant>:<role>"),
+  then returns temporary credentials scoped by the role's permission policy
+
+  boto3 s3 with the temporary creds: only this account's buckets, only this role's actions
+```
+
+A role in one account cannot reach another account's buckets. Within the account, the permission policy narrows
+access to the tenant's buckets (`<tenant>-*` by default) and, optionally, to
+named `buckets` and object `prefixes`.
+
+Each account holds two role namespaces:
+
+| Name | Owner | Reconciled |
+|---|---|---|
+| `<tenant>-<role>` | the platform | from config by `rgw_iam`, and pruned when it leaves config |
+| `<tenant>-x-<name>` | the tenant | never touched by `rgw_iam` (`rgw_iam_delegated_infix`) |
+
+## Variables
+
+Variables and vaulted secrets are prefixed with the role name (`rgw_sts_*`,
+`vault_rgw_sts_*`, ...). The commonly set ones are below; each role's README and
+`meta/argument_specs.yml` have the full list.
+
+### rgw_sts
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `rgw_sts_key` | `""` | STS session-token signing key, from vault. Required: the role refuses to enable STS auth while it is empty. |
+| `rgw_sts_roles` | `[]` | Standalone `AssumeRole` / `GetSessionToken` roles. Usually empty. |
+
+### rgw_tenants
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `rgw_tenants_endpoint` | `""` | RGW S3/IAM/STS endpoint the bootstrap host can reach. Required. |
+| `rgw_tenants_validate_certs` | `true` | Verify the endpoint's TLS certificate in the boto3 steps. |
+| `rgw_tenants_ca_bundle` | `""` | PEM CA bundle on the bootstrap host, for an endpoint with a private-CA certificate. |
+| `rgw_tenants_oidc` | `{provider_url, client_ids, thumbprints}` | The IdP realm to federate. Required. |
+| `rgw_tenants_list` | `[]` | The tenants (schema below). |
+| `rgw_tenants_dir` | `""` | Control-host directory of drop-in tenant files, each appended to `rgw_tenants_list`. |
+| `rgw_tenants_default_quota` | `{}` | Fallback storage quota for tenants that omit their own. |
+| `rgw_tenants_service_name` | `rgw.rgw` | cephadm RGW service restarted on an OIDC change. |
+
+### rgw_iam
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `rgw_iam_grant_claim` | `ceph_grants` | Name of the claim carrying the grants. |
+| `rgw_iam_roles` | `reader`, `writer`, `owner`, `iamadmin` | The global catalogue; every tenant gets one role per entry. |
+| `rgw_iam_capabilities` | see defaults | Named action bundles the catalogue composes from. |
+| `rgw_iam_session_duration` | `3600` | Session lifetime in seconds, bounded 3600..43200 by RGW. |
+| `rgw_iam_account_limits` | `{max_roles: 100}` | Per-account entity ceilings. |
+
+`rgw_iam_provider_url` defaults from `rgw_tenants_oidc.provider_url` and
+`rgw_iam_dir` from `rgw_tenants_dir`, so `rgw_iam` also runs standalone.
+
+## Tenant entry schema
+
+One entry per tenant in `rgw_tenants_list`, or one drop-in file per tenant in
+`rgw_tenants_dir`. `limits`, `roles` and `session_duration` are read by
+`rgw_iam`; the rest by `rgw_tenants`.
+
+| Key | Required | Meaning |
+|---|---|---|
+| `name` | yes | Tenant slug, `^[a-z0-9][a-z0-9-]*$`, at most 55 chars: account-root uid stem and default bucket prefix. No underscore: RGW rejects one in the `<tenant>-<role>` IAM role name. |
+| `account_id` | yes | RGW account id, `RGW` plus 17 digits, unique and stable. |
+| `state` | no | `present` (default) or `absent` (decommission). |
+| `buckets` | no | Bucket names to create as account-root; each must start with `bucket_prefix`. |
+| `bucket_prefix` | no | Prefix this tenant's buckets must carry. Default `<name>-`. |
+| `quota` | no | Storage cap `{enabled, max_size, max_objects}`. `max_size` in bytes, `-1` unlimited. |
+| `root_user` | no | Primary account-root uid, `^[a-z0-9][a-z0-9_-]*$`. Default `<name>root`. |
+| `root_users` | no | Additional account-root users, `[{name, state?, suspended?}]` → uid `iam-<name>-root-<slug>`. |
+| `rotate_keys` | no | Per-tenant equivalent of `rgw_tenants_rotate_keys`. |
+| `purge_objects` | no | With `state: absent`, the destroy-data gate. |
+| `limits` | no | Entity ceilings `{max_users, max_roles, max_groups, max_buckets, max_access_keys}`, `-1` unlimited. Consumed by `rgw_iam`. |
+| `roles` | no | Extra platform IAM roles for this tenant alone, `[{name, capabilities, buckets?, prefixes?}]`. Consumed by `rgw_iam`. |
+| `session_duration` | no | Session lifetime in seconds for this tenant's roles. Consumed by `rgw_iam`. |
+| `users` | no | Static-key service users, `[{name, capabilities, buckets?, prefixes?, state?, suspended?}]` → uid `iam-<name>-svc-<slug>`. Created by `rgw_tenants`, scoped by `rgw_iam`. |
+
+Entries are validated before anything is created. The `rgw_iam` keys are
+declared in `rgw_tenants`' `meta/argument_specs.yml` too, because whichever role
+loads an entry first validates it.
+
+Per tenant the vault must hold `vault_rgw_tenants_<name>_access_key` /
+`_secret_key`, plus `vault_rgw_tenants_<name>_root_<slug>_access_key` /
+`_secret_key` for each extra root user, and
+`vault_rgw_tenants_<name>_svc_<slug>_access_key` / `_secret_key` for each
+service user. (`<name>` with its hyphens written as underscores.)
+
+## Drop-in tenant files
+
+Set `rgw_tenants_dir` and every `*.yml`/`*.yaml` in it is loaded and appended to
+`rgw_tenants_list`: a tenant is added by dropping one file in and removed by
+deleting it. Each file holds both the config and the vaulted keys:
+
+```yaml
+# rgw_tenants.d/initrode-web.yml
 rgw_tenant_initrode_web:
-  name: initrode_web
+  name: initrode-web
   account_id: "RGW17887187248433597"
-  root_user: iam-initrode_web-root
-  buckets: [initrode_web-data, initrode_web-logs]
-vault_rgw_tenants_initrode_web_access_key: !vault |   # encrypted with your vault password
+  root_user: iam-initrode-web-root
+  buckets: [initrode-web-data, initrode-web-logs]
+vault_rgw_tenants_initrode_web_access_key: !vault |
   $ANSIBLE_VAULT;1.1;AES256;...
 vault_rgw_tenants_initrode_web_secret_key: !vault |
   $ANSIBLE_VAULT;1.1;AES256;...
 ```
 
-Add `-e '{"rgw_new_tenant_quota": {...}}'`, `-e '{"rgw_new_tenant_buckets":
-[...]}'`, or `-e '{"rgw_new_tenant_root_users": ["backup", "Erika Schröder"]}'`
-to seed those keys (all optional; a bare run gives an account plus its primary root).
-Point `rgw_tenants_dir` at that directory: the role loads every file in it and
-appends each to `rgw_tenants_list`. Dropping a file in adds a tenant. Deleting
-one only drops it from the list; nothing leaves the cluster. Removing a tenant
-from the cluster is `state: absent` plus a teardown run (see *Decommission a tenant*).
-Review, commit, then run `rgw_tenants` (`cephadm-tenants.yml`).
-Re-running for an existing tenant is refused unless `-e rgw_new_tenant_force=true`
-(which mints *new* keys).
+The tenant `name` is hyphenated, but the variable names are underscored,
+because Ansible variable names are identifiers. Drop-ins are collected by
+`varnames '^rgw_tenant_[a-z0-9_]+$'`; a `rgw_tenant_*` variable with a hyphen
+fails the run. `rgw_new_tenant.yml` writes both spellings.
 
-## Root users (day-2)
+Drop-ins are appended to any inline `rgw_tenants_list` and deduplicated by name,
+last wins, so a drop-in overrides an inline entry. `rgw_iam_dir` defaults to
+`rgw_tenants_dir`.
 
-`rgw_new_tenant` declares a tenant's primary `iam-<tenant>-root`; `rgw_tenants`
-creates it on the cluster. Beyond it, each account can carry additional
-**account-root users**: personalised keys handed to a tenant operator so they
-can self-serve buckets in their own tenant. They live in the same drop-in, as a
-`root_users` list plus their own vaulted keys. Buckets are account-owned, not
-owned by the creating uid, so adding or removing a root user touches no tenant data.
+### `playbooks/rgw_new_tenant.yml`
 
-**Add one.** The `rgw_add_root_user` playbook mints the key and merges it into
-the drop-in, leaving every existing key and `!vault` block byte-for-byte intact.
-Run it bare and it prompts for the tenant and the user (type the person's real
-name at the prompt, spaces are fine, no quoting):
+Generates one such file. The roles never generate keys, they read them from
+the vault; this playbook creates them. It does not touch the cluster.
 
 ```sh
-ansible-playbook playbooks/rgw_add_root_user.yml
-#  Existing RGW tenant account: initrode_web
-#  New root user, person name or service label: Erika Schröder
+ansible-playbook playbooks/rgw_new_tenant.yml -e rgw_new_tenant=initrode-web
 ```
 
-Or drive it non-interactively. A name with spaces then needs JSON
-(Ansible's `-e k=v` form splits on spaces):
+It prompts for the account name when `-e rgw_new_tenant=` is not given, allocates
+an `account_id` (`RGW` + `date +%s%N` truncated to 17 digits, or pass
+`-e rgw_new_tenant_account_id=`), mints a 20-char `IAM`-prefixed access key and a
+40-char secret from `random.SystemRandom`, and writes `<tenant>.yml` into
+`rgw_new_tenant_output_dir` (default `./rgw_tenants.d`). Add
+`-e '{"rgw_new_tenant_buckets": [...]}'`, `-e '{"rgw_new_tenant_quota": {...}}'`
+or `-e '{"rgw_new_tenant_root_users": ["backup", "Erika Schröder"]}'` to seed
+those keys. Re-running for an existing tenant is refused unless
+`-e rgw_new_tenant_force=true`, which rewrites the file from the given inputs,
+keeps the existing `account_id` (a different `rgw_new_tenant_account_id` is
+refused) and mints new keys. Existing users only pick up the new keys on a
+rotation run (`rgw_tenants_rotate_keys: true`, see the role README). A vault
+password is required: `ANSIBLE_VAULT_PASSWORD_FILE`, or
+`-e rgw_new_tenant_vault_password_file=<path>`.
+
+### `playbooks/rgw_add_root_user.yml`
+
+Adds one account-root user to an existing drop-in, merging the `root_users`
+entry and its two `!vault` blocks in and leaving every existing ciphertext
+byte-for-byte intact.
 
 ```sh
 ansible-playbook playbooks/rgw_add_root_user.yml \
-  -e rgw_add_root_user_tenant=initrode_web -e '{"rgw_add_root_user": "Erika Schröder"}'
+  -e rgw_add_root_user_tenant=initrode-web -e '{"rgw_add_root_user": "Erika Schröder"}'
 ```
 
-`rgw_add_root_user` is any person name or service label; it is sanitized to the
-descriptor slug, so the uid becomes `iam-initrode_web-root-erika_schroeder`.
-Re-running with the same user is an idempotent no-op. This appends to the drop-in:
+Run without `-e` it prompts for both. A name with spaces needs the JSON form
+above, because `-e k=v` splits on spaces. The name is sanitized to a descriptor
+slug, so the uid becomes `iam-initrode-web-root-erika_schroeder`. Re-running
+with the same user is a no-op.
+
+To remove a root user, set `state: absent` and **keep the entry** until
+`rgw_tenants` has run `user rm`, then delete the entry and its two vault blocks.
+Deleting the entry first orphans the cluster user. `suspended: true` keeps the
+keys and blocks access.
+
+### `playbooks/rgw_add_service_user.yml`
+
+Same as above, but writes a static-key service user: a `users:` entry plus
+its two `!vault` blocks, uid `iam-<tenant>-svc-<slug>`.
+
+```sh
+ansible-playbook playbooks/rgw_add_service_user.yml \
+  -e rgw_add_root_user_tenant=initrode-web -e rgw_add_root_user=etl \
+  -e '{"rgw_add_service_user_capabilities": ["objects-read"]}'
+```
+
+`rgw_tenants` creates the user with no permissions; `rgw_iam` adds its inline
+policy. Narrow it with `buckets:` / `prefixes:` on the entry. Intended for
+machine identities that cannot do an OIDC login; a leaked static key stays
+valid until it is rotated or the user is removed.
+
+## Read-only modes
+
+None of these change anything on the cluster.
+
+| Mode | Command | Covers |
+|---|---|---|
+| Drift preview | `--check --diff` | Every step the role would take, including the OIDC provider and the IAM roles a decommission would remove. |
+| Usage report | `-e rgw_tenants_report=true` | Used size/objects vs each account quota, and every tenant at or over 80%. Cached account stats, no `--sync-stats`. |
+| Brownfield discovery | `-e rgw_tenants_discover=true` | Inventories every RGW account, classifies it managed/unmanaged, and writes an adoption stub per unmanaged account to `rgw_tenants_discover_output_dir`. |
+| Verification | `cephadm-tenants-verify.yml` | Accounts, buckets and quotas. No IdP, no user password. |
+| IAM plan | `--check --diff` on `rgw_iam` | Every role missing, mis-trusted, stale or broken. A run with no changes means IAM matches config. |
+
+Unit tests for the logic that needs no cluster (IAM composition and diffing,
+naming, usage arithmetic, OIDC replacement):
+`python3 -m unittest discover -s tests/unit` from the collection root.
+
+`roles/rgw_tenants/files/verify_federation.py` tests login, assume and scoped S3
+for one user, including negative checks:
+
+```sh
+EP=https://s3.example.com \
+IDP=https://idp.example.com/realms/myrealm/protocol/openid-connect/token \
+CLIENT=ceph-s3 ACCOUNT_ID=RGW00000000000000001 \
+TENANT=acme ROLE=reader EXPECT=ro PASSWORD=... \
+CROSS_BUCKET=globex-data \
+python3 roles/rgw_tenants/files/verify_federation.py
+```
+
+`USERNAME` defaults to `<TENANT>-<ROLE>`, and that login user must hold the
+grant `<TENANT>:<ROLE>` in the grant claim. `EXPECT` is `rw` by default, or `ro`
+when a write must be denied. `CROSS_BUCKET` names another tenant's bucket, which
+must be unreachable.
+
+## Destructive gates
+
+The roles are idempotent. Operations that destroy data or credentials are
+gated:
+
+| Gate | Default | Effect when off |
+|---|---|---|
+| `rgw_tenants_rotate_keys` (or per-tenant `rotate_keys`) | `false` | An existing account-root user's keys are never touched. |
+| `rgw_tenants_allow_teardown` | `false` | `state: absent` entries are reported and skipped, so committing one never deletes a tenant. |
+| `rgw_tenants_allow_purge` | `false` | A tenant's `purge_objects` has no effect; a non-empty bucket or account fails the run instead of being destroyed. |
+| `rgw_tenants_allow_root_user_removal` | `true` | `root_users` marked `state: absent` are reported and skipped. |
+| `rgw_iam_prune` | `false` | Stale platform roles and stray policies are reported, not removed. |
+
+### Rotate account-root keys
+
+Update `vault_rgw_tenants_<name>_access_key` / `_secret_key`, set
+`rgw_tenants_rotate_keys: true` (or the tenant's `rotate_keys`), run once, set it
+back. The task installs the vaulted key and removes every other access key on
+that user. It is idempotent while on.
+
+### Decommission a tenant
+
+Set `state: absent` on the entry and run with
+`-e rgw_tenants_allow_teardown=true`. Teardown is idempotent and runs in this
+order: buckets, OIDC provider, IAM roles, additional root users, the primary
+account-root user, the account.
 
 ```yaml
-rgw_tenant_initrode_web:
-  # ...
-  root_users:
-    - name: erika_schroeder
-vault_rgw_tenants_initrode_web_root_erika_schroeder_access_key: !vault | ...
-vault_rgw_tenants_initrode_web_root_erika_schroeder_secret_key: !vault | ...
+rgw_tenants_list:
+  - name: acme
+    account_id: "RGW00000000000000001"
+    state: absent
+    buckets: ["acme-data"]  # keep the list so they get removed
+    # purge_objects: true   # only if they still hold data (destructive)
 ```
 
-Review, commit, run `rgw_tenants`. The role creates the account-root user with those keys.
+The IAM step deletes every role under the `<name>-` prefix, including any
+`<name>-x-*` roles the tenant created, after removing their policies.
+`rgw_iam` skips tenants marked `state: absent`.
 
-**Remove or suspend one.** No playbook, a desired-state edit the role reconciles:
+If the tenant created its own buckets, users or roles, `account rm` refuses the
+non-empty account and the run fails without deleting anything. Setting
+`purge_objects: true` **and** `-e rgw_tenants_allow_purge=true` runs
+`account rm --purge-data` instead. Keep the entry and its vault keys until the
+run reports all `OK`, then delete both.
 
-- *Remove:* set the entry's `state: absent` (**keep it in the list**),
-  run `rgw_tenants` once so it issues `radosgw-admin user rm`
-  (gated by `rgw_tenants_allow_root_user_removal`, default `true`),
-  *then* delete the entry and its two `vault_..._root_<slug>_*` blocks.
-  Deleting the entry first orphans the cluster user, which the role can no longer remove.
-- *Suspend:* set `suspended: true` (or back to `false`).
-  The role reconciles suspend/enable each converge, keeping the keys but blocking access.
+## Naming conventions
 
-## Verify it worked
+`rgw_new_tenant` and `rgw_add_root_user` build every identifier through the
+`ceph_naming` filters (`ceph_descriptor`, `ceph_root_uid`, `ceph_account_valid`,
+`ceph_group`). The user ARN is `<account_id>:user/<display-name>`, so uid and
+display-name are always the same string.
 
-- Read-only, no IdP needed. Asserts every `<tenant>-<tier>` role and every
-  declared bucket exists, then prints desired-vs-live quota:
-  ```sh
-  kayobe playbook run .../ansible/ceph/cephadm-tenants-verify.yml
-  ```
-  (the `rgw_tenants` role's `verify` task set; see the example play). It loads
-  `rgw_tenants_dir` drop-ins itself, so it sees the same tenants a provisioning
-  run does. With no tenants configured it reports `NOTHING VERIFIED` rather than
-  a pass.
-- Full federation path, per user:
-  `roles/rgw_tenants/files/verify_federation.py`
-  (needs `boto3` and the user's IdP password; env-driven, see its docstring).
-  It checks the tier's allowed op, the reader deny, and — when `CROSS_BUCKET`
-  names another tenant's bucket — that the account boundary keeps it unreachable.
+| Thing | Format | Example |
+|---|---|---|
+| Account name | lowercase `[a-z0-9-]`, ≤55 | `initrode-data-prod` |
+| Primary root | `iam-<account>-root` | `iam-initrode-data-prod-root` |
+| Extra root | `iam-<account>-root-<descriptor>` | `iam-globex-data-root-backup` |
+| Service user | `iam-<account>-svc-<descriptor>` | `iam-globex-data-svc-etl` |
+| Group | `<account>-<role>`, no `iam-` prefix | `globex-data-uploaders` |
+
+The two slugs fold in opposite directions. A person or label goes through
+`ceph_descriptor`: umlauts transliterated (`ö→oe`, `ä→ae`,
+`ü→ue`, `ß→ss`), other diacritics stripped, spaces **and hyphens** folded to
+`_`, so `"Erika Schröder"` becomes `erika_schroeder`. A hyphen-free descriptor
+keeps `iam-<account>-root-<descriptor>` splittable on `-root-`. An account name
+goes through `ceph_account_slug`, which folds spaces and underscores **to `-`**,
+because RGW role names cannot contain `_` and roles are named
+`<account>-<role>`.
+
+The generator warns when sanitizing changed the input. An account name cannot be
+changed later: it determines the uid, the vault key names, the bucket prefix and
+every role ARN. The role's own default `root_user` is `<name>root`, not
+`iam-<name>-root`.
 
 ## Compute the OIDC thumbprint
 
 The thumbprint is the SHA1 of the JWKS signing cert (the `use=sig` key's `x5c`),
-not the IdP TLS chain. The example ships a `CHANGEME` sentinel that the role
-refuses to register. Compute the real one with:
+**not** the IdP's TLS chain. The role rejects any value that is not 40 hex
+characters, including the example's `CHANGEME` placeholder.
 
 ```sh
 curl -s https://idp.example.com/realms/myrealm/protocol/openid-connect/certs \
@@ -263,51 +422,30 @@ curl -s https://idp.example.com/realms/myrealm/protocol/openid-connect/certs \
       der=base64.b64decode(k["x5c"][0]); print(hashlib.sha1(der).hexdigest())'
 ```
 
-Recompute and re-run whenever the realm signing key rotates.
-On drift the OIDC helper deletes and recreates the provider
-(RGW has no thumbprint-update operation) and the role restarts RGW.
-
-## Decommission a tenant
-
-Set `state: absent` on the tenant entry, then run deliberately with
-`-e rgw_tenants_allow_teardown=true`; a scheduled converge only warns about
-pending absent entries. Teardown order: buckets, OIDC provider, tier roles,
-extra root users, account-root user, account.
-
-```yaml
-rgw_tenants_list:
-  - name: acme
-    account_id: "RGW00000000000000001"
-    state: absent
-    # purge_objects: true   # only if buckets still hold data (destructive)
-    buckets: ["acme-data"]  # keep the bucket list so they get removed
-```
-
-This removes what the collection provisioned. If the tenant self-served its own
-buckets/users/roles, plain `account rm` refuses on the non-empty account and the
-run fails without deleting anything. Destroying data takes a second gate on top
-of teardown: `purge_objects: true` on the entry *and*
-`-e rgw_tenants_allow_purge=true`, which cascades
-(`bucket rm --purge-objects`, `account rm --purge-data`).
-A non-empty bucket in the list behaves the same way. Keep the entry (with
-`state: absent`) and its `vault_rgw_tenants_*` keys until the run reports all
-`OK`, then delete both. Only provider removal uses the tenant's own account-root
-keys; the bucket, user and account steps are `radosgw-admin`.
-Re-runs after the account is gone still report `OK`/`ABSENT`.
+Recompute and re-run whenever the realm signing key rotates. RGW cannot update
+thumbprints, so the module deletes and recreates the provider (rolling back if
+the recreate fails) and the role restarts RGW.
 
 ## Operational notes
 
-- RGW caches the OIDC provider in memory, so the role restarts RGW after any
-  provider change. `rgw_tenants` waits for RGW to answer before its boto3 steps
-  (the STS role's restart is async).
-- Account-scoped `radosgw-admin` operations need `--account-id` on every call, or they 404.
-- Both interfaces can update a trust policy in place, and both are used:
-  `rgw_tenants` provisions roles through the IAM API (`manage_role.py`,
-  `UpdateAssumeRolePolicy`), and `rgw_sts` uses `radosgw-admin role-trust-policy
-  modify`. Edit a trust policy and the next run applies it. Note the CLI spelling:
-  `role-trust-policy modify` is the only one that has ever existed — the man page
-  documents `role modify`, which is in no release, and `role update` changes only
-  `--max-session-duration`.
+- RGW caches OIDC providers in memory, so both roles restart it after a
+  provider change. `rgw_tenants` waits for RGW to answer before its boto3 steps.
+- `rgw_iam_provider_url` must have no trailing slash, or every assume fails with
+  `AccessDenied`. The role asserts this.
+- Policy action names are RGW's, not AWS's. One unrecognised name makes RGW
+  discard the whole policy, so `rgw_iam` treats any parse error as fatal.
+- Trust policies are updated in place. Recreating a role would change its
+  `RoleId` and invalidate live sessions.
+- Tagging a role breaks every assume of it, and the tag cannot be removed on
+  19.2.4. `rgw_iam` reports such a role as `BROKEN` and rebuilds it under
+  `rgw_iam_prune`.
+- There is no session revocation. A withdrawn grant stays usable until the
+  session expires (`rgw_iam_session_duration`).
+- Account-scoped `radosgw-admin` commands need `--account-id`, or they 404.
+- `radosgw-admin` takes S3 keys only on its argv. Those tasks are `no_log`, but
+  the keys are briefly visible in `ps` and `/proc/<pid>/cmdline` on the
+  bootstrap host; mount `/proc` with `hidepid=2` there. The boto3 steps take
+  credentials from the environment.
 
 ## License
 

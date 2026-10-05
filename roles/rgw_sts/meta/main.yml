@@ -3,7 +3,7 @@ galaxy_info:
   role_name: rgw_sts
   namespace: underknowledge
   author: Underknowledge
-  description: Native Ceph RGW STS - signing key, S3 STS auth, standalone IAM roles.
+  description: Native Ceph RGW STS - session-token signing key, S3 STS auth, standalone IAM roles.
   license: Apache-2.0
   min_ansible_version: "2.15"
   platforms:
@@ -20,5 +20,5 @@ galaxy_info:
     - sts
     - s3
     - iam
-# rgw_tenants needs this applied first, but runs as its own play — deliberately not a role dependency.
+# Run before rgw_tenants, as a separate play so the RGW restart lands between the two.
 dependencies: []

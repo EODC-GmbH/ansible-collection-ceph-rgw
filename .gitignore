@@ -26,8 +26,8 @@ roles/*/files/__pycache__/
 !README.md
 !CHANGELOG.md
 !roles/*/README.md
-# docs/ likewise: the roles' fail_msg text points operators at docs/CEPH-VERSIONS.md by
-# name, so ignoring it means shipping a dangling pointer.
+# docs/ likewise: the README links operator documentation there by name, so ignoring
+# it means shipping a dangling pointer.
 !docs/*.md
 
 # Editor / temp / backup files (nano, vim, emacs, generic scratch).

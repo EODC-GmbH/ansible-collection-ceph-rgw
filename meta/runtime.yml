@@ -1,3 +1,4 @@
 ---
-# Floor for FQCN role addressing and the filters these roles use; kayobe 2024.1/2025.1 ship well above it.
+# Floor for FQCN role addressing and the filters these roles use. Kayobe 2024.1/2025.1
+# ship well above it.
 requires_ansible: ">=2.15.0"

@@ -1,43 +1,31 @@
 ---
-# Read-only usage-vs-quota report: used size/objects against each configured tenant's account quota, with
-# a percentage where the cap is finite.
-- name: Stage the report helper
-  ansible.builtin.copy:
-    src: report_tenants.py
-    dest: "/var/run/ceph/{{ _rgw_tenants_fsid }}/report_tenants.py"
-    owner: root
-    group: root
-    mode: "0755"
+# Lists every account rather than reading each tenant's: `account get` fails on an
+# account that does not exist yet, which would abort the whole report.
+- name: Read every account and its usage
+  underknowledge.ceph_rgw.rgw_account_info:
+    all: true
+    stats: true
+    fsid: "{{ rgw_tenants_fsid | default(omit, true) }}"
+  register: _rgw_report_reg
   become: true
 
-# `cephadm shell` carries none of the host env into the container, hence the file. The helper reads only
-# name + account_id.
-- name: Stage the report input (configured tenants)
-  ansible.builtin.copy:
-    content: "{{ {'tenants': rgw_tenants_list} | to_json }}"
-    dest: "/var/run/ceph/{{ _rgw_tenants_fsid }}/report_input.json"
-    owner: root
-    group: root
-    mode: "0600"
-  become: true
-
-- name: Compute the usage report (read-only)
-  ansible.builtin.command: cephadm shell -- python3 /var/run/ceph/report_tenants.py
-  register: _rgw_report_out
-  changed_when: false
-  check_mode: false
-  become: true
-
-- name: Parse the report
+- name: Join usage to quota for the configured tenants
   ansible.builtin.set_fact:
-    _rgw_report: "{{ (_rgw_report_out.stdout | underknowledge.ceph_rgw.ceph_json).reports }}"
+    _rgw_report: >-
+      {{ _rgw_report_reg.accounts
+         | selectattr('id', 'in', rgw_tenants_list | map(attribute='account_id') | list)
+         | list | underknowledge.ceph_rgw.ceph_usage_report(rgw_tenants_list) }}
+    _rgw_report_missing: >-
+      {{ rgw_tenants_list
+         | rejectattr('account_id', 'in', _rgw_report_reg.accounts | map(attribute='id') | list)
+         | map(attribute='name') | list }}
 
 - name: "Usage: per tenant"
   ansible.builtin.debug:
     msg: >-
       {{ item.name }} ({{ item.account_id }}):
-      size {{ (item.used_size / 1024 / 1024 / 1024) | round(2) }} GiB
-      {{ '/ ' ~ (item.max_size | int / 1024 / 1024 / 1024) | round(2) ~ ' GiB (' ~ item.size_pct ~ '%)' if item.size_pct is not none else '/ unlimited' }};
+      size {{ (item.used_size / 1024 ** 3) | round(2) }} GiB
+      {{ '/ ' ~ (item.max_size | int / 1024 ** 3) | round(2) ~ ' GiB (' ~ item.size_pct ~ '%)' if item.size_pct is not none else '/ unlimited' }};
       objects {{ item.used_objects }}
       {{ '/ ' ~ item.max_objects ~ ' (' ~ item.objects_pct ~ '%)' if item.objects_pct is not none else '/ unlimited' }}
       {{ '[quota OFF]' if not item.enabled else '' }}
@@ -45,10 +33,13 @@
   loop_control:
     label: "{{ item.name }}"
 
+- name: "Usage: tenants configured but not on the cluster"
+  ansible.builtin.debug:
+    msg: "no account yet: {{ _rgw_report_missing }}"
+  when: _rgw_report_missing | length > 0
+
 - name: "Usage: tenants at or over 80% of a cap"
   ansible.builtin.debug:
     msg: >-
       near/over quota (>=80%):
-      {{ ((_rgw_report | selectattr('size_pct', 'ne', none) | selectattr('size_pct', 'ge', 80) | map(attribute='name') | list)
-          + (_rgw_report | selectattr('objects_pct', 'ne', none) | selectattr('objects_pct', 'ge', 80) | map(attribute='name') | list))
-         | unique | default(['none'], true) }}.
+      {{ _rgw_report | underknowledge.ceph_rgw.ceph_over_quota | default(['none'], true) }}

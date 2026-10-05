@@ -1,53 +1,59 @@
 ---
-# Add one account-root user to an existing tenant drop-in: mint and vault-encrypt a key pair for
-# iam-$tenant-root-$slug, then merge the root_users entry and its two inline !vault blocks into the
-# tenant's file. Existing keys and vault blocks are copied through byte-for-byte. Touches no cluster.
+# Add one account-root user to an existing tenant drop-in: generate keys for
+# iam-<tenant>-root-<slug>, vault-encrypt them, and merge the root_users entry and its two
+# !vault blocks into the file. Existing ciphertext is copied through unchanged. Touches no
+# cluster.
 #
-# Adding needs a play because it mints a secret. Removing or suspending is a desired-state edit the role
-# reconciles on the next converge:
-#   * Remove:  set `state: absent` on the entry and LEAVE it in the list. Run the role once so it issues
-#              `radosgw-admin user rm`, then delete the entry and its two vault_ blocks. Delete the entry
-#              first and the cluster user is orphaned — the role never sees it again.
-#   * Suspend: set `suspended: true` (or back to false).
+# To remove a user, set `state: absent` on its entry and run rgw_tenants, then delete the
+# entry and its vault blocks. To suspend one, set `suspended: true`.
 #
-# Both inputs are prompted when not passed via -e, so a bare run is interactive (a prompt reads a whole
-# line, so a person's name with spaces needs no quoting):
-#   ansible-playbook playbooks/rgw_add_root_user.yml
+#   ansible-playbook playbooks/rgw_add_root_user.yml                 # prompts
 #   ANSIBLE_VAULT_PASSWORD_FILE=~/.vault-pass \
 #   ansible-playbook playbooks/rgw_add_root_user.yml \
-#     -e rgw_add_root_user_tenant=initrode_data_prod -e 'rgw_add_root_user=backup'
+#     -e rgw_add_root_user_tenant=initrode-data-prod -e 'rgw_add_root_user=backup'
 #
-# Inputs (rgw_add_root_user_tenant + rgw_add_root_user are prompted or -e; both required):
-#   rgw_add_root_user_tenant           account name of the existing tenant to add the root to
-#   rgw_add_root_user                  raw person name or service label; sanitized to the
-#                                      descriptor slug (iam-$tenant-root-$slug) by ceph_descriptor
-#   rgw_add_root_user_output_dir       the drop-in directory, default $playbook_dir/rgw_tenants.d
+# Inputs (both names are prompted when not passed; both required):
+#   rgw_add_root_user_tenant           existing tenant account name
+#   rgw_add_root_user                  person name or service label, sanitized to the
+#                                      descriptor slug by ceph_descriptor
+#   rgw_add_root_user_output_dir       default ./rgw_tenants.d
 #   rgw_add_root_user_vault_password_file  default $ANSIBLE_VAULT_PASSWORD_FILE
+#
+# rgw_add_service_user.yml imports this play to write a service user
+# (iam-<tenant>-svc-<slug>, under `users:`) instead.
 - name: Add an account-root user to a tenant drop-in
   hosts: localhost
   connection: local
   gather_facts: false
+  # A name with spaces needs no quoting at the prompt; with -e it does.
   vars_prompt:
     - name: rgw_add_root_user_tenant
-      prompt: "Existing RGW tenant account (e.g. initrode_data_prod)"
+      prompt: "Existing RGW tenant account (e.g. initrode-data-prod)"
       private: false
     - name: rgw_add_root_user
-      prompt: "New root user, person name or service label (e.g. Erika Schröder, or backup)"
+      prompt: "New user, person name or service label (e.g. Erika Schröder, or backup)"
       private: false
   vars:
-    # Aliased to _ar_* instead of defaulting the public names here: a play var outranks inventory, so it
-    # would shadow any group_vars override and leave -e as the only way in.
+    # Aliased rather than declared under their own names: a play var would shadow an
+    # inventory override.
     _ar_output_dir: "{{ rgw_add_root_user_output_dir | default(playbook_dir ~ '/rgw_tenants.d', true) }}"
     _ar_vault_password_file: "{{ rgw_add_root_user_vault_password_file | default(lookup('ansible.builtin.env', 'ANSIBLE_VAULT_PASSWORD_FILE'), true) }}"
-    # Canonicalize it the way rgw_new_tenant stored it, or the file lookup and the vault key names miss.
-    # The guard keeps an empty input as '' so the assert below reports it instead of the filter raising.
-    _ar_tenant: "{{ (rgw_add_root_user_tenant | underknowledge.ceph_rgw.ceph_descriptor) if (rgw_add_root_user_tenant | default('') | length > 0) else '' }}"
+    # Canonicalized the same way rgw_new_tenant does, so file and vault key names match.
+    # Guarded so '' reaches the assert instead of a filter error.
+    _ar_tenant: "{{ (rgw_add_root_user_tenant | underknowledge.ceph_rgw.ceph_account_slug) if (rgw_add_root_user_tenant | default('') | length > 0) else '' }}"
     _ar_slug: "{{ rgw_add_root_user | default('') | underknowledge.ceph_rgw.ceph_descriptor }}"
-    _ar_uid: "{{ _ar_tenant | underknowledge.ceph_rgw.ceph_root_uid(_ar_slug) }}"
+    _ar_kind: "{{ _ar_import_kind | default('root') }}"
+    _ar_list: "{{ 'users' if _ar_kind == 'svc' else 'root_users' }}"
+    _ar_uid: >-
+      {{ (_ar_slug | underknowledge.ceph_rgw.rgw_service_user_name(_ar_tenant)) if _ar_kind == 'svc'
+         else (_ar_tenant | underknowledge.ceph_rgw.ceph_root_uid(_ar_slug)) }}
+    _ar_capabilities: "{{ rgw_add_service_user_capabilities | default([], true) }}"
     _ar_dropin: "{{ _ar_output_dir }}/{{ _ar_tenant }}.yml"
-    _ar_var: "rgw_tenant_{{ _ar_tenant }}"
-    _ar_ak_name: "vault_rgw_tenants_{{ _ar_tenant }}_root_{{ _ar_slug }}_access_key"
-    _ar_sk_name: "vault_rgw_tenants_{{ _ar_tenant }}_root_{{ _ar_slug }}_secret_key"
+    # Variable names cannot carry the tenant name's hyphens.
+    _ar_var_tenant: "{{ _ar_tenant | replace('-', '_') }}"
+    _ar_var: "rgw_tenant_{{ _ar_var_tenant }}"
+    _ar_ak_name: "vault_rgw_tenants_{{ _ar_var_tenant }}_{{ _ar_kind }}_{{ _ar_slug }}_access_key"
+    _ar_sk_name: "vault_rgw_tenants_{{ _ar_var_tenant }}_{{ _ar_kind }}_{{ _ar_slug }}_secret_key"
   tasks:
     - name: Assert a tenant and a user were provided
       ansible.builtin.assert:
@@ -65,16 +71,17 @@
       ansible.builtin.debug:
         msg: >-
           You entered tenant '{{ rgw_add_root_user_tenant }}', using the canonical account name
-          '{{ _ar_tenant }}'.
+          '{{ _ar_tenant }}'. Re-run with the exact name
+          if this is not the tenant you meant.
       when: _ar_tenant != rgw_add_root_user_tenant
 
-    - name: Assert the tenant name is a valid <org>_<purpose>[_<qualifier>]
+    - name: Assert the tenant name is valid
       ansible.builtin.assert:
         quiet: true
         that: _ar_tenant | underknowledge.ceph_rgw.ceph_account_valid
         fail_msg: >-
           '{{ rgw_add_root_user_tenant }}' is not a valid account name: it must sanitize
-          to a lowercase snake_case <org>_<purpose>, e.g. initrode_data_prod.
+          to a lowercase [a-z0-9-] name of at most 55 characters, e.g. initrode-data-prod.
           Got '{{ _ar_tenant }}'.
 
     - name: Assert a vault password file is available
@@ -82,16 +89,15 @@
         quiet: true
         that: _ar_vault_password_file | length > 0
         fail_msg: >-
-          No vault password file to encrypt the generated keys with. Export
-          ANSIBLE_VAULT_PASSWORD_FILE, or pass -e rgw_add_root_user_vault_password_file=<path>
-          (e.g. kayobe's vault helper).
+          No vault password file. Export ANSIBLE_VAULT_PASSWORD_FILE or pass
+          -e rgw_add_root_user_vault_password_file=<path>; it encrypts the generated keys.
 
-    - name: Confirm the tenant drop-in exists
+    - name: Check for the tenant drop-in
       ansible.builtin.stat:
         path: "{{ _ar_dropin }}"
       register: _ar_stat
 
-    - name: Fail if the drop-in is missing (create the tenant first)
+    - name: Assert the drop-in exists
       ansible.builtin.assert:
         quiet: true
         that: _ar_stat.stat.exists
@@ -99,65 +105,85 @@
           {{ _ar_dropin }} not found. A root user can only be added to an existing tenant;
           run ansible-playbook playbooks/rgw_new_tenant.yml -e rgw_new_tenant={{ _ar_tenant }} first.
 
-    # Namespaced to _ar_loaded to keep the decrypted vault_* values out of the global scope.
+    # Namespaced so the decrypted vault_* values stay out of global scope.
     - name: Load the drop-in config
       ansible.builtin.include_vars:
         file: "{{ _ar_dropin }}"
         name: _ar_loaded
-
-    - name: Extract the tenant entry
-      ansible.builtin.set_fact:
-        _ar_entry: "{{ _ar_loaded[_ar_var] }}"
 
     - name: Assert the drop-in holds the expected tenant entry
       ansible.builtin.assert:
         quiet: true
         that:
           - _ar_var in _ar_loaded
-          - _ar_entry.name | default('') == _ar_tenant
+          - _ar_loaded[_ar_var].name | default('') == _ar_tenant
         fail_msg: >-
-          {{ _ar_dropin }} does not define {{ _ar_var }}, or its name != {{ _ar_tenant }}. It must be an
-          rgw_new_tenant-generated drop-in for this tenant.
+          {{ _ar_dropin }} does not define {{ _ar_var }} (or its name != {{ _ar_tenant }}). The file
+          must be an rgw_new_tenant-generated drop-in for this tenant.
 
-    - name: Note existing root-user slugs
+    - name: Extract the tenant entry
       ansible.builtin.set_fact:
-        _ar_existing: "{{ _ar_entry.root_users | default([]) | map(attribute='name') | list }}"
+        _ar_entry: "{{ _ar_loaded[_ar_var] }}"
 
-    # Minting a second key pair for the same slug would write a duplicate YAML key, so stop instead.
-    - name: Stop cleanly if the root user already exists
+    - name: List existing user slugs
+      ansible.builtin.set_fact:
+        _ar_existing: "{{ _ar_entry[_ar_list] | default([]) | map(attribute='name') | list }}"
+
+    - name: Stop if the user already exists
       when: _ar_slug in _ar_existing
       block:
-        - name: Report the existing root user (nothing to do)
+        - name: Report the existing user (nothing to do)
           ansible.builtin.debug:
             msg: "{{ _ar_uid }} already declared in {{ _ar_dropin }}; nothing to do."
-        - name: End the play (idempotent no-op)
+        - name: End the play
           ansible.builtin.meta: end_play
 
-    # Split the raw file at the first column-0 `vault_` key — config is all indented under the tenant key,
-    # so that seam is unambiguous. Copy the vault region through verbatim: re-encrypting re-salts every
-    # block and rewrites keys that did not change.
-    - name: Slurp the raw drop-in text
+    # The vault region starts at the first column-0 `vault_` key: all config is indented
+    # under the tenant key. It is copied through verbatim, never re-encrypted.
+    - name: Read the raw drop-in text
       ansible.builtin.set_fact:
         _ar_raw: "{{ lookup('ansible.builtin.file', _ar_dropin) }}"
 
-    - name: Isolate the existing vault region (first ^vault_ key to EOF)
+    - name: Extract the existing vault region
       ansible.builtin.set_fact:
-        _ar_vault_region: "{{ _ar_raw | regex_search('(?ms)^vault_.*\\Z') }}"
+        _ar_vault_region: "{{ _ar_raw | regex_search('(?ms)^vault_.*\\Z') | default('', true) }}"
 
     - name: Assert the primary root's vault keys are present
       ansible.builtin.assert:
         quiet: true
         that:
           - _ar_vault_region | length > 0
-          - "'vault_rgw_tenants_' ~ _ar_tenant ~ '_access_key' in _ar_vault_region"
+          - "'vault_rgw_tenants_' ~ _ar_var_tenant ~ '_access_key' in _ar_vault_region"
         fail_msg: >-
-          {{ _ar_dropin }} has no recognizable vault region, so it is not an rgw_new_tenant-generated
-          drop-in. Refusing to edit it.
+          {{ _ar_dropin }} has no recognizable vault region;
+          it does not look like an rgw_new_tenant-generated drop-in. Refusing to edit it.
 
-    # Secrets go down stdin, never argv. Keep `--encrypt-vault-id default`: it is what disambiguates our
-    # --vault-password-file from the outer run's ANSIBLE_VAULT_PASSWORD_FILE. The /dev/null path keeps the
-    # password lookup from caching the minted key to disk.
-    - name: Encrypt the new root's access key
+    # An entry removed by hand with its vault blocks left behind would otherwise get a
+    # second, duplicate key.
+    - name: Assert the new user's vault keys are not already in the file
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - _ar_ak_name not in _ar_vault_region
+          - _ar_sk_name not in _ar_vault_region
+        fail_msg: >-
+          {{ _ar_dropin }} already holds {{ _ar_ak_name }} or {{ _ar_sk_name }} without a
+          matching {{ _ar_list }} entry. Remove the stale vault blocks and re-run.
+
+    - name: Assert the service user name fits IAM's 64-character limit
+      ansible.builtin.assert:
+        quiet: true
+        that: _ar_uid | length <= 64
+        fail_msg: >-
+          {{ _ar_uid }} is {{ _ar_uid | length }} characters; IAM user names are limited to
+          64, and rgw_tenants would refuse the entry. Use a shorter name.
+      when: _ar_kind == 'svc'
+
+    # The password lookup with /dev/null generates without storing. Plaintext goes on
+    # stdin, not argv. --encrypt-vault-id default picks our password file when the outer
+    # run also exports ANSIBLE_VAULT_PASSWORD_FILE. check_mode: false because these write
+    # nothing and the copy below needs their output.
+    - name: Encrypt the new user's access key
       ansible.builtin.command:
         argv: [ansible-vault, encrypt_string, --vault-password-file, "{{ _ar_vault_password_file }}",
                --encrypt-vault-id, default, --stdin-name, "{{ _ar_ak_name }}"]
@@ -165,9 +191,10 @@
         stdin_add_newline: false
       register: _ar_enc_access
       changed_when: false
+      check_mode: false
       no_log: true
 
-    - name: Encrypt the new root's secret key
+    - name: Encrypt the new user's secret key
       ansible.builtin.command:
         argv: [ansible-vault, encrypt_string, --vault-password-file, "{{ _ar_vault_password_file }}",
                --encrypt-vault-id, default, --stdin-name, "{{ _ar_sk_name }}"]
@@ -175,11 +202,12 @@
         stdin_add_newline: false
       register: _ar_enc_secret
       changed_when: false
+      check_mode: false
       no_log: true
 
-    # to_nice_yaml emits keys sorted, the same as rgw_new_tenant, so the diff stays at one added list item
-    # plus the two appended vault blocks.
-    - name: Write the drop-in back with the new root user merged in
+    # to_nice_yaml re-emits the config the way rgw_new_tenant wrote it, so the diff is the
+    # new list item and the two new vault blocks.
+    - name: Write the drop-in back with the new user merged in
       ansible.builtin.copy:
         dest: "{{ _ar_dropin }}"
         mode: "0600"
@@ -193,15 +221,20 @@
           {{ _ar_enc_access.stdout }}
           {{ _ar_enc_secret.stdout }}
       vars:
+        _ar_new: >-
+          {{ {'name': _ar_slug, 'capabilities': _ar_capabilities} if _ar_kind == 'svc'
+             else {'name': _ar_slug} }}
         _ar_merged: >-
-          {{ _ar_entry | combine({'root_users':
-             (_ar_entry.root_users | default([])) + [{'name': _ar_slug}]}) }}
+          {{ _ar_entry | combine({_ar_list: (_ar_entry[_ar_list] | default([])) + [_ar_new]}) }}
 
-    - name: Report what was added (no secrets shown)
+    - name: Report what was added
       ansible.builtin.debug:
         msg:
           - "tenant:    {{ _ar_tenant }}  ({{ _ar_entry.account_id }})"
-          - "new root:  {{ _ar_uid }}  (from '{{ rgw_add_root_user }}')"
+          - "new {{ _ar_kind }}:  {{ _ar_uid }}  (from '{{ rgw_add_root_user }}')"
           - "vault keys: {{ _ar_ak_name }} / {{ _ar_sk_name }}"
           - "drop-in:   {{ _ar_dropin }}"
-          - "next: review, commit, run rgw_tenants to create the user on the cluster."
+          - >-
+            {{ ('capabilities: ' ~ (_ar_capabilities | join(', ') or 'none; the user can only list buckets until you add some') ~ '. ')
+               if _ar_kind == 'svc' else '' }}next: review, commit, run rgw_tenants to create
+            the user{{ ' and rgw_iam to put its policy' if _ar_kind == 'svc' else '' }}.

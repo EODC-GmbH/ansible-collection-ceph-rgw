@@ -1,32 +1,18 @@
 ---
-# Read-only brownfield discovery: classify every RGW account against rgw_tenants_list, write an adoption
-# stub for each unmanaged one. Every radosgw-admin call is a list/get; the only writes are stub files on
-# the control host.
-- name: Build the managed account-id set from rgw_tenants_list
+# Read-only on the cluster. The only writes are adoption stubs on the control host.
+- name: Collect the managed account ids
   ansible.builtin.set_fact:
     _rgw_discover_managed_ids: "{{ rgw_tenants_list | map(attribute='account_id') | list }}"
 
-# `cephadm shell` mounts /var/run/ceph/$fsid as /var/run/ceph, which is why the dest here and the path
-# passed to python3 below differ.
-- name: Stage the discovery helper
-  ansible.builtin.copy:
-    src: discover_tenants.py
-    dest: "/var/run/ceph/{{ _rgw_tenants_fsid }}/discover_tenants.py"
-    owner: root
-    group: root
-    mode: "0755"
+# buckets: true costs one `bucket stats` per bucket in the cluster; it lets a stub list
+# the buckets the account already owns.
+- name: List all RGW accounts
+  underknowledge.ceph_rgw.rgw_account_info:
+    all: true
+    buckets: true
+    fsid: "{{ rgw_tenants_fsid | default(omit, true) }}"
+  register: _rgw_discover
   become: true
-
-- name: Inventory all RGW accounts (read-only)
-  ansible.builtin.command: cephadm shell -- python3 /var/run/ceph/discover_tenants.py
-  register: _rgw_discover_out
-  changed_when: false
-  check_mode: false
-  become: true
-
-- name: Parse the discovery output
-  ansible.builtin.set_fact:
-    _rgw_discover_accounts: "{{ (_rgw_discover_out.stdout | underknowledge.ceph_rgw.ceph_json).accounts }}"
 
 - name: Report managed vs unmanaged
   ansible.builtin.debug:
@@ -35,11 +21,11 @@
       [{{ 'MANAGED' if item.id in _rgw_discover_managed_ids else 'UNMANAGED' }}]
       users={{ item.users | length }} roles={{ item.roles | length }}
       buckets={{ item.buckets | join(',') if item.buckets else '-' }}
-  loop: "{{ _rgw_discover_accounts }}"
+  loop: "{{ _rgw_discover.accounts }}"
   loop_control:
     label: "{{ item.id }}"
 
-- name: Ensure the discovery output directory (control host)
+- name: Create the discovery output directory
   ansible.builtin.file:
     path: "{{ rgw_tenants_discover_output_dir }}"
     state: directory
@@ -47,23 +33,23 @@
   delegate_to: localhost
   become: false
 
-- name: Write an adoption stub for each UNMANAGED account (control host)
+- name: Write an adoption stub for each unmanaged account
   ansible.builtin.template:
     src: adopt-tenant.yml.j2
     dest: "{{ rgw_tenants_discover_output_dir }}/adopt-{{ item.id }}.yml"
     mode: "0644"
   vars:
-    acct: "{{ item }}"
-  loop: "{{ _rgw_discover_accounts | rejectattr('id', 'in', _rgw_discover_managed_ids) | list }}"
+    _rgw_tenants_acct: "{{ item }}"
+  loop: "{{ _rgw_discover.accounts | rejectattr('id', 'in', _rgw_discover_managed_ids) | list }}"
   loop_control:
     label: "{{ item.id }}"
   delegate_to: localhost
   become: false
 
-- name: Summary
+- name: Report the discovery summary
   ansible.builtin.debug:
     msg: >-
-      {{ _rgw_discover_accounts | length }} accounts:
-      {{ _rgw_discover_accounts | selectattr('id', 'in', _rgw_discover_managed_ids) | list | length }} managed,
-      {{ _rgw_discover_accounts | rejectattr('id', 'in', _rgw_discover_managed_ids) | list | length }} unmanaged
-      (adoption stubs in {{ rgw_tenants_discover_output_dir }}/).
+      {{ _rgw_discover.accounts | length }} accounts:
+      {{ _rgw_discover.accounts | selectattr('id', 'in', _rgw_discover_managed_ids) | list | length }} managed,
+      {{ _rgw_discover.accounts | rejectattr('id', 'in', _rgw_discover_managed_ids) | list | length }} unmanaged
+      (adoption stubs in {{ rgw_tenants_discover_output_dir }}/). No cluster changes made.

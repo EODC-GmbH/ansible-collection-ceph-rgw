@@ -1,18 +1,15 @@
 ---
-# state: present path. Accounts and their root users come first, because the OIDC, role and bucket steps
-# all sign in to RGW as that account-root: the order is load-bearing. _rgw_tenants_fsid and the staged
-# boto3 helpers under /var/run/ceph/$fsid/ come from main.yml.
-- name: Provision tenant accounts, users, and (gated) key rotation
+- name: Provision accounts and primary root users
   ansible.builtin.include_tasks: provision_accounts.yml
 
-- name: Provision additional account-root users (create / suspend / offboard)
+- name: Provision additional root users
   ansible.builtin.include_tasks: provision_root_users.yml
 
-- name: Reconcile tenant account quotas and entity limits
-  ansible.builtin.include_tasks: provision_quotas.yml
+- name: Provision service users
+  ansible.builtin.include_tasks: provision_users.yml
 
-- name: Register OIDC providers and provision per-tier IAM roles
-  ansible.builtin.include_tasks: provision_roles.yml
+- name: Provision OIDC providers
+  ansible.builtin.include_tasks: provision_oidc.yml
 
-- name: Create per-tenant buckets
+- name: Provision buckets
   ansible.builtin.include_tasks: provision_buckets.yml

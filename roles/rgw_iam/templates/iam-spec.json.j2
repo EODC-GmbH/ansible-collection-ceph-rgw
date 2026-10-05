@@ -1,0 +1,28 @@
+{#- Declarative spec handed to the rgw_iam_sync module, which composes the trust and
+    permission documents, validates them and reconciles. Data only: the expansion and
+    scoping logic lives in plugins/module_utils/rgw_iam.py, which tests/unit exercises
+    without a cluster.
+
+    Only the tenant keys this role uses are projected, so an unrelated edit in a drop-in
+    does not rewrite this file and report a spurious change. -#}
+{
+  "grant_claim": {{ rgw_iam_grant_claim | to_json }},
+  "delegated_infix": {{ rgw_iam_delegated_infix | to_json }},
+  "provider_host": {{ rgw_iam_provider_url | regex_replace('^https?://', '') | to_json }},
+  "policy_name": {{ rgw_iam_policy_name | to_json }},
+  "prune": {{ rgw_iam_prune | bool | to_json }},
+  "capabilities": {{ rgw_iam_capabilities | to_json }},
+  "baseline": {{ rgw_iam_baseline_capabilities | to_json }},
+  "catalogue": {{ rgw_iam_roles | to_json }},
+  "tenants": [
+{% for tenant in rgw_iam_tenants | sort(attribute='name') %}
+    {{ {"name": tenant.name,
+        "account_id": tenant.account_id,
+        "bucket_prefix": tenant.bucket_prefix | default(tenant.name ~ '-'),
+        "roles": tenant.roles | default([]),
+        "users": tenant.users | default([]),
+        "session_duration": tenant.session_duration | default(rgw_iam_session_duration),
+        "limits": rgw_iam_account_limits | combine(tenant.limits | default({}))} | to_json }}{{ "," if not loop.last else "" }}
+{% endfor %}
+  ]
+}

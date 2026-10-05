@@ -1,0 +1,126 @@
+---
+argument_specs:
+  main:
+    short_description: Reconcile the per-tenant IAM roles a federated user assumes.
+    description:
+      - Composes one IAM role per tenant x catalogue entry from named capability bundles,
+        and reconciles the whole estate against it in one pass.
+      - Run after rgw_tenants, which creates the accounts and their OIDC providers.
+    options:
+      rgw_iam_bootstrap_host:
+        type: str
+        required: false
+        description: Host owning the cephadm bootstrap keyring; all radosgw-admin work runs there.
+      rgw_iam_fsid:
+        type: str
+        required: false
+        description: Cluster fsid for the module. Empty reads it from /etc/ceph/ceph.conf.
+      rgw_iam_dir:
+        type: str
+        required: false
+        description: >-
+          Drop-in tenant directory, default rgw_tenants_dir. Merged by name with
+          rgw_tenants_list and rgw_iam_tenants.
+      rgw_iam_tenants:
+        type: list
+        elements: dict
+        required: false
+        description: >-
+          Tenants to reconcile, in the rgw_tenants entry format (validated by that role's
+          spec). Reads name, account_id, roles, users, session_duration and limits.
+      rgw_iam_provider_url:
+        type: str
+        required: false
+        description: OIDC issuer, matching the token's iss exactly, with no trailing slash.
+      rgw_iam_grant_claim:
+        type: str
+        required: false
+        description: The multivalued claim carrying "<tenant>:<role>" grants (default ceph_grants).
+      rgw_iam_policy_name:
+        type: str
+        required: false
+        description: Name of the single inline policy this role writes on each platform role.
+      rgw_iam_delegated_infix:
+        type: str
+        required: false
+        description: >-
+          Infix separating the tenant-managed namespace "<tenant>-<infix>-*", which this role
+          never touches, from the platform namespace "<tenant>-<role>".
+      rgw_iam_session_duration:
+        type: int
+        required: false
+        description: >-
+          Default session lifetime in seconds, 3600..43200. A withdrawn grant stays usable
+          this long.
+      rgw_iam_account_limits:
+        type: dict
+        required: false
+        description: >-
+          Per-account entity ceilings (max_users, max_roles, max_groups, max_buckets,
+          max_access_keys). Set {} to leave RGW's own defaults alone.
+      rgw_iam_endpoint:
+        type: str
+        required: false
+        description: >-
+          IAM API endpoint for service users' inline policies. Defaults to
+          rgw_tenants_endpoint; needed only when a tenant declares users.
+      rgw_iam_s3_region:
+        type: str
+        required: false
+        description: SigV4 signing region for that endpoint. Defaults to rgw_tenants_s3_region.
+      rgw_iam_validate_certs:
+        type: bool
+        required: false
+        description: Verify the endpoint's TLS certificate. Defaults to rgw_tenants_validate_certs.
+      rgw_iam_ca_bundle:
+        type: str
+        required: false
+        description: PEM CA bundle on the bootstrap host for the endpoint. Defaults to rgw_tenants_ca_bundle.
+      rgw_iam_dry_run:
+        type: bool
+        required: false
+        default: false
+        description: Deprecated alias for --check.
+      rgw_iam_prune:
+        type: bool
+        required: false
+        default: false
+        description: >-
+          Remove platform roles and inline policies no longer in the spec, and rebuild
+          roles tagged out of band.
+      rgw_iam_capabilities:
+        type: dict
+        required: false
+        description: >-
+          Named action bundles, each {scope, actions}; scope is buckets, account or
+          delegated-iam. Action names are RGW's; one unknown name voids the whole policy.
+      rgw_iam_baseline_capabilities:
+        type: list
+        elements: str
+        required: false
+        description: Capabilities granted to every role regardless of catalogue entry.
+      rgw_iam_roles:
+        type: list
+        elements: dict
+        required: false
+        description: The global role catalogue; every tenant gets one role per entry.
+        options:
+          name:
+            type: str
+            required: true
+            description: Role name within the tenant; the IAM role is "<tenant>-<name>".
+          capabilities:
+            type: list
+            elements: str
+            required: true
+            description: Names from rgw_iam_capabilities.
+          buckets:
+            type: list
+            elements: str
+            required: false
+            description: Narrow the role to these buckets; the default is every bucket of the tenant.
+          prefixes:
+            type: list
+            elements: str
+            required: false
+            description: Narrow to these object key prefixes, with a matching s3:prefix condition.

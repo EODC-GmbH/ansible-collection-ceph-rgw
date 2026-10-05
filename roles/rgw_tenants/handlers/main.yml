@@ -1,9 +1,11 @@
 ---
-# Without this restart, web-identity AssumeRole keeps failing with "Signature can not be validated with
-# the JWKS present": RGW caches the provider (thumbprint + client ids) in memory, and an IAM-API create
-# or replace does not refresh the running daemon.
+# RGW caches OIDC provider info (thumbprint + client ids) in memory, and a create or
+# replace via the IAM API does not refresh the running daemon: web-identity AssumeRole
+# keeps failing with "Signature can not be validated with the JWKS present" until RGW
+# restarts.
 - name: Restart RGW for OIDC
-  ansible.builtin.command: "cephadm shell -- ceph orch restart {{ rgw_tenants_service_name }}"
-  changed_when: true
+  underknowledge.ceph_rgw.rgw_orch_restart:
+    service: "{{ rgw_tenants_service_name }}"
+    fsid: "{{ rgw_tenants_fsid | default(omit, true) }}"
   become: true
   when: inventory_hostname == rgw_tenants_bootstrap_host

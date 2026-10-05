@@ -1,10 +1,13 @@
 ---
-# Append these two imports to etc/kayobe/ansible/ceph/cephadm.yml, after the existing
-# "Import Cephadm commands post playbook" line. Keep them in this order: STS sets rgw_sts_key /
-# rgw_s3_auth_use_sts and restarts RGW, and the tenants play needs STS already on.
+# Add these three imports to the end of etc/kayobe/ansible/ceph/cephadm.yml, after the
+# existing "Import Cephadm commands post playbook" line. The order is required: tenants
+# asserts STS is on, and IAM's trust policies name the providers tenants registers.
 
 - name: Import Cephadm STS playbook
   import_playbook: cephadm-sts.yml
 
 - name: Import Cephadm tenants (multi-tenant S3) playbook
   import_playbook: cephadm-tenants.yml
+
+- name: Import Cephadm IAM (tenant roles + policies) playbook
+  import_playbook: cephadm-iam.yml

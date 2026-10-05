@@ -1,9 +1,11 @@
 ---
-# Native RGW STS: session tokens for AssumeRole and AssumeRoleWithWebIdentity. Import it
-# after cephadm-commands-post.yml so the RGW restart it triggers picks up the full config. Values come
-# from your environment's cephadm.yml, the signing key from its vault (vault_rgw_sts_key).
+# Configure native RGW STS (session tokens for AssumeRole / GetSessionToken /
+# AssumeRoleWithWebIdentity), with underknowledge.ceph_rgw.rgw_sts. Runs after
+# cephadm-commands-post.yml so its RGW restart picks up the full config. Values come from
+# your environment's cephadm.yml, the signing key from its vault (vault_rgw_sts_key).
 #
-# Copy into etc/kayobe/ansible/ceph/ and add the import_playbook to cephadm.yml (see cephadm.yml.snippet).
+# Copy this file into etc/kayobe/ansible/ceph/ and add its import_playbook to cephadm.yml
+# (see cephadm.yml.snippet).
 - name: Ensure native RGW STS is configured
   gather_facts: false
   hosts: mons
