@@ -1,0 +1,25 @@
+---
+# Stops unless the hosts the runner reaches belong to the test cluster.
+# Read-only; lib.sh runs it before any script changes the cluster.
+#   -e rgw_test_fsid=<fsid> [-e rgw_test_ceph_conf=<path>]
+- name: Refuse anything but the test cluster
+  hosts: "{{ rgw_converge_hosts | default('mons') }}"
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Read ceph.conf
+      ansible.builtin.slurp:
+        src: "{{ rgw_test_ceph_conf | default('/etc/ceph/ceph.conf') }}"
+      register: rgw_test_conf
+
+    - name: Compare its fsid with the test cluster's
+      vars:
+        rgw_test_found: >-
+          {{ rgw_test_conf.content | b64decode
+             | regex_search('fsid\s*=\s*([0-9a-f-]{36})', '\1') | default([''], true) | first }}
+      ansible.builtin.assert:
+        that: rgw_test_found == rgw_test_fsid
+        fail_msg: >-
+          {{ inventory_hostname }} is in cluster {{ rgw_test_found }},
+          not the test cluster {{ rgw_test_fsid }}
+        quiet: true

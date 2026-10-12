@@ -13,17 +13,37 @@
   ansible.builtin.meta: end_play
   when: rgw_tenants_discover | bool
 
+# A misspelt name would otherwise reconcile nothing and report success.
+- name: Refuse a limit naming an unknown tenant
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - rgw_tenants_limit is not string
+      - _rgw_tenants_unknown | length == 0
+    fail_msg: >-
+      {% if rgw_tenants_limit is string %}rgw_tenants_limit must be a list of tenant names,
+      as in -e '{"rgw_tenants_limit": ["{{ rgw_tenants_limit }}"]}'.
+      {% else %}rgw_tenants_limit names {{ _rgw_tenants_unknown }}, which no drop-in or
+      rgw_tenants_list entry declares.{% endif %}
+  vars:
+    _rgw_tenants_unknown: "{{ rgw_tenants_limit | difference(rgw_tenants_list | map(attribute='name')) }}"
+  when: rgw_tenants_limit | length > 0
+
 # Computed on every host so the loop expressions stay defined where the bootstrap-host
-# `when` skips their tasks.
+# `when` skips their tasks. rgw_tenants_limit narrows both; validation above saw all.
 - name: Partition tenants into present and absent
   ansible.builtin.set_fact:
     _rgw_tenants_present: >-
-      {{ (rgw_tenants_list | rejectattr('state', 'defined') | list)
-         + (rgw_tenants_list | selectattr('state', 'defined')
+      {{ (_rgw_tenants_selected | rejectattr('state', 'defined') | list)
+         + (_rgw_tenants_selected | selectattr('state', 'defined')
             | rejectattr('state', 'equalto', 'absent') | list) }}
     _rgw_tenants_absent: >-
-      {{ rgw_tenants_list | selectattr('state', 'defined')
+      {{ _rgw_tenants_selected | selectattr('state', 'defined')
          | selectattr('state', 'equalto', 'absent') | list }}
+  vars:
+    _rgw_tenants_selected: >-
+      {{ (rgw_tenants_list | selectattr('name', 'in', rgw_tenants_limit) | list)
+         if rgw_tenants_limit | length > 0 else rgw_tenants_list }}
 
 - name: Validate tenant configuration
   ansible.builtin.assert:
@@ -141,15 +161,19 @@
 - name: Assert STS auth is enabled
   ansible.builtin.assert:
     quiet: true
-    that: "rgw_tenants_sts_check.config.rgw_s3_auth_use_sts == 'true'"
+    # Under --check, rgw_sts earlier in the same run only reports that it would set it.
+    that: >-
+      rgw_tenants_sts_check.config.rgw_s3_auth_use_sts == 'true'
+      or (ansible_check_mode and rgw_sts_auth_reg | default({}) is changed)
     fail_msg: >-
       rgw_s3_auth_use_sts is not 'true'; run the rgw_sts role (cephadm-sts.yml) before
       rgw_tenants (cephadm-tenants.yml). See the collection README ordering note.
+      Under --check, rgw_sts must run earlier in the same run on this host.
   when:
     - rgw_tenants_list | length > 0
     - inventory_hostname == rgw_tenants_bootstrap_host
 
-# rgw_sts restarts RGW asynchronously, so a fresh deploy can reach this before RGW answers.
+# rgw_sts may have just restarted RGW, which reports running before it listens.
 - name: Wait for the RGW endpoint to answer
   ansible.builtin.uri:
     url: "{{ rgw_tenants_endpoint }}"
@@ -160,6 +184,8 @@
   until: rgw_tenants_endpoint_reg.status in [200, 403, 405]
   retries: 30
   delay: 5
+  # Read-only, and the --check previews below need the endpoint.
+  check_mode: false
   when:
     - rgw_tenants_list | length > 0
     - inventory_hostname == rgw_tenants_bootstrap_host

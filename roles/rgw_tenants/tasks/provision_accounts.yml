@@ -30,9 +30,53 @@
     access_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_access_key') }}"
     secret_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_secret_key') }}"
     rotate_keys: "{{ (rgw_tenants_rotate_keys | default(false) | bool) or (item.rotate_keys | default(false) | bool) }}"
+    keys: "{{ item.access_keys | default([]) }}"
     fsid: "{{ rgw_tenants_fsid | default(omit, true) }}"
   loop: "{{ _rgw_tenants_present }}"
   loop_control:
     label: "{{ item.root_user | default(item.name ~ 'root') }}"
+  register: _rgw_tenants_root_reg
   become: true
   when: inventory_hostname == rgw_tenants_bootstrap_host
+
+# S3 rejects keys the cluster does not hold as if the user did not exist,
+# so the OIDC and bucket tasks would report a missing account-root.
+# A rotation pending under --check may differ.
+- name: Stop when a tenant's vaulted keys do not match the cluster
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - item.keys_match is not sameas false or 'rotated' in item.actions
+      - item.keys_drift | default([]) | length == 0 or 'rotated' in item.actions
+    fail_msg: >-
+      {% if item.user.access_key_ids | default(['?']) | length == 0 %}
+      {{ item.item.root_user | default(item.item.name ~ 'root') }}
+      holds no key on the cluster, so the vaulted pair cannot match;
+      a key removed by hand is not put back on its own, in case it was revoked on purpose.
+      {% else %}vault keys for {{ item.item.name }}
+      do not match the cluster's keys for {{ item.item.root_user | default(item.item.name ~ 'root') }}
+      (the primary pair, or an access_keys entry whose secret differs).{% endif %}
+      Set rotate_keys: true on this tenant to move the cluster onto the vaulted pair,
+      or restore the previous
+      vault_rgw_tenants_{{ item.item.name | replace('-', '_') }}_access_key/_secret_key.
+  loop: "{{ _rgw_tenants_root_reg.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: inventory_hostname == rgw_tenants_bootstrap_host
+
+# S3 rejects the vaulted keys until the rotation is applied,
+# so the preview would show the OIDC provider and buckets as "would create".
+- name: Skip the S3 preview for tenants with a pending key rotation
+  ansible.builtin.set_fact:
+    _rgw_tenants_rotation_pending: >-
+      {{ _rgw_tenants_root_reg.results | default([])
+         | selectattr('keys_match', 'defined') | selectattr('keys_match', 'sameas', false)
+         | map(attribute='item.name') | list }}
+
+- name: Report tenants whose OIDC and bucket preview is skipped
+  ansible.builtin.debug:
+    msg: >-
+      {{ _rgw_tenants_rotation_pending }}: key rotation pending,
+      so --check cannot read their OIDC provider or buckets with the new keys.
+      Those steps are skipped in this preview.
+  when: _rgw_tenants_rotation_pending | length > 0

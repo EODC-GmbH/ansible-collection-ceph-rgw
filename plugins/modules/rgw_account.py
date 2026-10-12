@@ -11,12 +11,12 @@ DOCUMENTATION = r"""
 ---
 module: rgw_account
 short_description: Manage a Ceph RGW account and its storage quota
-version_added: "0.2.0"
+version_added: "0.3.0"
 description:
   - Creates or removes an RGW account - the hard tenant isolation boundary - and
     reconciles its account-scoped storage quota.
   - Account entity limits (C(max_users), C(max_roles) and friends) are deliberately not
-    managed here. C(rgw_iam_sync) is the single writer of C(account modify); two writers
+    managed here. C(rgw_iam_sync) is their single writer; two writers
     would each report the other's write as drift on alternate runs.
 options:
   account_id:
@@ -92,7 +92,7 @@ EXAMPLES = r"""
 - name: Ensure the tenant account exists with a 5 TiB cap
   underknowledge.ceph_rgw.rgw_account:
     account_id: RGW00000000000000001
-    name: tenant-acme
+    name: tenant-aviato
     quota:
       enabled: true
       max_size: "{{ 5 * 1024 ** 4 }}"
@@ -111,8 +111,14 @@ account:
   returned: when state is present
   type: dict
   sample:
-    name: tenant-acme
+    name: tenant-aviato
     quota: {enabled: true, max_size: 5497558138880, max_objects: 1000000}
+actions:
+  description: What the run did, or would do in check mode. Any of C(created), C(removed), C(renamed), C(quota).
+  returned: always
+  type: list
+  elements: str
+  sample: [created]
 exec_mode_used:
   description: Which execution path actually ran.
   returned: always
@@ -124,12 +130,7 @@ from ansible.module_utils.basic import AnsibleModule
 from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw import (
     RGW, RGW_COMMON_ARGS, RGWError, diff_of,
 )
-
-
-def read_account(rgw, account_id):
-    rc, info, _, _ = rgw.run("account", "get", "--account-id", account_id,
-                             check_rc=False)
-    return info if rc == 0 else None
+from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw_read import read_account
 
 
 def snapshot(info):

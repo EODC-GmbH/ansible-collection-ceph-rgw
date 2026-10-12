@@ -1,0 +1,65 @@
+---
+# Resolve the vault id the generators encrypt with,
+# as _rgw_gen_vault_label and _rgw_gen_vault_source.
+# Imported by rgw_new_tenant.yml and tasks/add_user.yml.
+#
+# Inputs:
+#   _rgw_gen_vault_password_file   the playbook's explicit *_vault_password_file, or ''
+#   _rgw_gen_vault_input_var       that variable's name, for the failure message
+#
+# First match wins: the explicit file, Ansible's vault_password_file,
+# Ansible's vault_identity_list (the vault_encrypt_identity entry, else the first),
+# then KAYOBE_VAULT_PASSWORD through files/kayobe_vault_password.sh.
+# The config lookups apply ansible.cfg and the ANSIBLE_* env vars with Ansible's own precedence.
+- name: Resolve the vault id to encrypt with
+  ansible.builtin.set_fact:
+    _rgw_gen_vault_id: "{{ [_from_input, _from_cfg_file, _from_cfg_ids, _from_kayobe] | select | first | default('') }}"
+  vars:
+    _label: "{{ lookup('ansible.builtin.config', 'DEFAULT_VAULT_IDENTITY') }}"
+    _cfg_file: "{{ lookup('ansible.builtin.config', 'DEFAULT_VAULT_PASSWORD_FILE') | default('', true) }}"
+    _cfg_ids: "{{ lookup('ansible.builtin.config', 'DEFAULT_VAULT_IDENTITY_LIST') }}"
+    _cfg_encrypt_id: "{{ lookup('ansible.builtin.config', 'DEFAULT_VAULT_ENCRYPT_IDENTITY') | default('', true) }}"
+    _cfg_id: >-
+      {{ _cfg_ids | select('match', (_cfg_encrypt_id | regex_escape) ~ '@') | first
+         | default(_cfg_ids | first | default('')) }}
+    _from_input: "{{ (_label ~ '@' ~ _rgw_gen_vault_password_file) if _rgw_gen_vault_password_file else '' }}"
+    _from_cfg_file: "{{ (_label ~ '@' ~ _cfg_file) if _cfg_file else '' }}"
+    # An identity list entry may omit the label, as in `--vault-id /path`.
+    _from_cfg_ids: "{{ '' if not _cfg_id else _cfg_id if '@' in _cfg_id else _label ~ '@' ~ _cfg_id }}"
+    _from_kayobe: >-
+      {{ (_label ~ '@' ~ playbook_dir ~ '/files/kayobe_vault_password.sh')
+         if lookup('ansible.builtin.env', 'KAYOBE_VAULT_PASSWORD') else '' }}
+
+- name: Assert a vault password is configured
+  ansible.builtin.assert:
+    quiet: true
+    that: _rgw_gen_vault_id | length > 0
+    fail_msg: >-
+      No vault password configured.
+      Set ANSIBLE_VAULT_PASSWORD_FILE (or vault_password_file in ansible.cfg),
+      or pass -e {{ _rgw_gen_vault_input_var }}=<path>;
+      in a kayobe environment KAYOBE_VAULT_PASSWORD also works.
+
+- name: Split the vault id into label and source
+  ansible.builtin.set_fact:
+    _rgw_gen_vault_label: "{{ _rgw_gen_vault_id.split('@', 1)[0] }}"
+    _rgw_gen_vault_source: "{{ _rgw_gen_vault_id.split('@', 1)[1] }}"
+
+- name: Check the vault password source
+  ansible.builtin.stat:
+    path: "{{ _rgw_gen_vault_source }}"
+  register: _rgw_gen_vault_stat
+
+# stdin carries the plaintext, so a prompt source cannot work.
+# ansible-vault reads a non-executable script as the password itself,
+# so a lost executable bit on the kayobe script would encrypt with the script's text.
+- name: Assert the vault password source is usable
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - _rgw_gen_vault_stat.stat.exists
+      - _rgw_gen_vault_stat.stat.executable or _rgw_gen_vault_source is not search('/kayobe_vault_password\.sh$')
+    fail_msg: >-
+      Vault password source '{{ _rgw_gen_vault_source }}' (vault id {{ _rgw_gen_vault_label }})
+      is not a readable file{{ ' or not executable' if _rgw_gen_vault_stat.stat.exists else '' }}.
+      Point the vault setting at a password file or script.

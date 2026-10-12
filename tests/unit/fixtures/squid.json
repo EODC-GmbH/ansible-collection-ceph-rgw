@@ -1,0 +1,617 @@
+{
+    "version": "ceph version 19.2.4 (7cc0193a616a3333d22b7762037fa5b73a4d06a6) squid (stable)",
+    "release": "squid",
+    "account_id": "RGW90000000000000001",
+    "steps": [
+        {
+            "name": "account create",
+            "via": "radosgw-admin",
+            "argv": [
+                "account",
+                "create",
+                "--account-id",
+                "RGW90000000000000001",
+                "--account-name",
+                "capture-raviga"
+            ],
+            "rc": 0,
+            "stdout": "{\n    \"id\": \"RGW90000000000000001\",\n    \"tenant\": \"\",\n    \"name\": \"capture-raviga\",\n    \"email\": \"\",\n    \"quota\": {\n        \"enabled\": false,\n        \"check_on_raw\": false,\n        \"max_size\": -1,\n        \"max_size_kb\": 0,\n        \"max_objects\": -1\n    },\n    \"bucket_quota\": {\n        \"enabled\": false,\n        \"check_on_raw\": false,\n        \"max_size\": -1,\n        \"max_size_kb\": 0,\n        \"max_objects\": -1\n    },\n    \"max_users\": 1000,\n    \"max_roles\": 1000,\n    \"max_groups\": 1000,\n    \"max_buckets\": 1000,\n    \"max_access_keys\": 4\n}\n",
+            "stderr": ""
+        },
+        {
+            "name": "user create",
+            "via": "radosgw-admin",
+            "argv": [
+                "user",
+                "create",
+                "--uid",
+                "captureroot",
+                "--account-id",
+                "RGW90000000000000001",
+                "--display-name",
+                "captureroot",
+                "--account-root",
+                "--access-key",
+                "AKCAPTUREHELD0000000",
+                "--secret-key",
+                "SKCAPTUREHELD0000000000000000000000000000"
+            ],
+            "rc": 0,
+            "stdout": "{\n    \"user_id\": \"captureroot\",\n    \"display_name\": \"captureroot\",\n    \"email\": \"\",\n    \"suspended\": 0,\n    \"max_buckets\": 1000,\n    \"subusers\": [],\n    \"keys\": [\n        {\n            \"user\": \"captureroot\",\n            \"access_key\": \"AKCAPTUREHELD0000000\",\n            \"secret_key\": \"SKCAPTUREHELD0000000000000000000000000000\",\n            \"active\": true,\n            \"create_date\": \"2026-10-08T10:04:54.456416Z\"\n        }\n    ],\n    \"swift_keys\": [],\n    \"caps\": [],\n    \"op_mask\": \"read, write, delete\",\n    \"default_placement\": \"\",\n    \"default_storage_class\": \"\",\n    \"placement_tags\": [],\n    \"bucket_quota\": {\n        \"enabled\": false,\n        \"check_on_raw\": false,\n        \"max_size\": -1,\n        \"max_size_kb\": 0,\n        \"max_objects\": -1\n    },\n    \"user_quota\": {\n        \"enabled\": false,\n        \"check_on_raw\": false,\n        \"max_size\": -1,\n        \"max_size_kb\": 0,\n        \"max_objects\": -1\n    },\n    \"temp_url_keys\": [],\n    \"type\": \"root\",\n    \"mfa_ids\": [],\n    \"account_id\": \"RGW90000000000000001\",\n    \"path\": \"/\",\n    \"create_date\": \"2026-10-08T10:04:54.456394Z\",\n    \"tags\": [],\n    \"group_ids\": []\n}\n\n",
+            "stderr": ""
+        },
+        {
+            "name": "role create",
+            "via": "radosgw-admin",
+            "argv": [
+                "role",
+                "create",
+                "--role-name",
+                "capture-reader",
+                "--account-id",
+                "RGW90000000000000001",
+                "--assume-role-policy-doc",
+                "{\"Version\": \"2012-10-17\", \"Statement\": [{\"Effect\": \"Allow\", \"Action\": [\"sts:AssumeRoleWithWebIdentity\"], \"Principal\": {\"Federated\": [\"arn:aws:iam::RGW90000000000000001:oidc-provider/idp/realms/capture\"]}}]}"
+            ],
+            "rc": 0,
+            "stdout": "{\n    \"RoleId\": \"e3b414e1-490b-4f3a-b4e9-749ab648e5e1\",\n    \"RoleName\": \"capture-reader\",\n    \"Path\": \"/\",\n    \"Arn\": \"arn:aws:iam::RGW90000000000000001:role/capture-reader\",\n    \"CreateDate\": \"2026-10-08T10:04:54.798Z\",\n    \"Description\": \"\",\n    \"MaxSessionDuration\": 3600,\n    \"AssumeRolePolicyDocument\": \"{\\\"Version\\\": \\\"2012-10-17\\\", \\\"Statement\\\": [{\\\"Effect\\\": \\\"Allow\\\", \\\"Action\\\": [\\\"sts:AssumeRoleWithWebIdentity\\\"], \\\"Principal\\\": {\\\"Federated\\\": [\\\"arn:aws:iam::RGW90000000000000001:oidc-provider/idp/realms/capture\\\"]}}]}\",\n    \"AccountId\": \"RGW90000000000000001\"\n}\n",
+            "stderr": ""
+        },
+        {
+            "name": "role-policy put",
+            "via": "radosgw-admin",
+            "argv": [
+                "role-policy",
+                "put",
+                "--role-name",
+                "capture-reader",
+                "--account-id",
+                "RGW90000000000000001",
+                "--policy-name",
+                "tenant",
+                "--policy-doc",
+                "{\"Version\": \"2012-10-17\", \"Statement\": [{\"Effect\": \"Allow\", \"Action\": [\"s3:GetObject\"], \"Resource\": [\"arn:aws:s3:::capture/*\"]}]}"
+            ],
+            "rc": 0,
+            "stdout": "Permission policy attached successfully\n",
+            "stderr": ""
+        },
+        {
+            "name": "account list",
+            "via": "radosgw-admin",
+            "argv": [
+                "account",
+                "list"
+            ],
+            "rc": 0,
+            "stdout": "[\n    \"RGW17912119512160052\",\n    \"RGW00000000000000001\",\n    \"RGW00000000000000002\",\n    \"RGW17914535096550160\",\n    \"RGW00000000000000005\",\n    \"RGW00000000000000004\",\n    \"RGW00000000000000006\",\n    \"RGW17912101794841486\",\n    \"RGW00000000000000003\",\n    \"RGW90000000000000001\"\n]\n",
+            "stderr": ""
+        },
+        {
+            "name": "account get",
+            "via": "radosgw-admin",
+            "argv": [
+                "account",
+                "get",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 0,
+            "stdout": "{\n    \"id\": \"RGW90000000000000001\",\n    \"tenant\": \"\",\n    \"name\": \"capture-raviga\",\n    \"email\": \"\",\n    \"quota\": {\n        \"enabled\": false,\n        \"check_on_raw\": false,\n        \"max_size\": -1,\n        \"max_size_kb\": 0,\n        \"max_objects\": -1\n    },\n    \"bucket_quota\": {\n        \"enabled\": false,\n        \"check_on_raw\": false,\n        \"max_size\": -1,\n        \"max_size_kb\": 0,\n        \"max_objects\": -1\n    },\n    \"max_users\": 1000,\n    \"max_roles\": 1000,\n    \"max_groups\": 1000,\n    \"max_buckets\": 1000,\n    \"max_access_keys\": 4\n}\n",
+            "stderr": ""
+        },
+        {
+            "name": "user list",
+            "via": "radosgw-admin",
+            "argv": [
+                "user",
+                "list",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 0,
+            "stdout": "[\n    \"captureroot\"\n]\n",
+            "stderr": ""
+        },
+        {
+            "name": "user info",
+            "via": "radosgw-admin",
+            "argv": [
+                "user",
+                "info",
+                "--uid",
+                "captureroot",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 0,
+            "stdout": "{\n    \"user_id\": \"captureroot\",\n    \"display_name\": \"captureroot\",\n    \"email\": \"\",\n    \"suspended\": 0,\n    \"max_buckets\": 1000,\n    \"subusers\": [],\n    \"keys\": [\n        {\n            \"user\": \"captureroot\",\n            \"access_key\": \"AKCAPTUREHELD0000000\",\n            \"secret_key\": \"SKCAPTUREHELD0000000000000000000000000000\",\n            \"active\": true,\n            \"create_date\": \"2026-10-08T10:04:54.456416Z\"\n        }\n    ],\n    \"swift_keys\": [],\n    \"caps\": [],\n    \"op_mask\": \"read, write, delete\",\n    \"default_placement\": \"\",\n    \"default_storage_class\": \"\",\n    \"placement_tags\": [],\n    \"bucket_quota\": {\n        \"enabled\": false,\n        \"check_on_raw\": false,\n        \"max_size\": -1,\n        \"max_size_kb\": 0,\n        \"max_objects\": -1\n    },\n    \"user_quota\": {\n        \"enabled\": false,\n        \"check_on_raw\": false,\n        \"max_size\": -1,\n        \"max_size_kb\": 0,\n        \"max_objects\": -1\n    },\n    \"temp_url_keys\": [],\n    \"type\": \"root\",\n    \"mfa_ids\": [],\n    \"account_id\": \"RGW90000000000000001\",\n    \"path\": \"/\",\n    \"create_date\": \"2026-10-08T10:04:54.456394Z\",\n    \"tags\": [],\n    \"group_ids\": []\n}\n\n",
+            "stderr": ""
+        },
+        {
+            "name": "user info by held key",
+            "via": "radosgw-admin",
+            "argv": [
+                "user",
+                "info",
+                "--access-key",
+                "AKCAPTUREHELD0000000"
+            ],
+            "rc": 0,
+            "stdout": "{\n    \"user_id\": \"captureroot\",\n    \"display_name\": \"captureroot\",\n    \"email\": \"\",\n    \"suspended\": 0,\n    \"max_buckets\": 1000,\n    \"subusers\": [],\n    \"keys\": [\n        {\n            \"user\": \"captureroot\",\n            \"access_key\": \"AKCAPTUREHELD0000000\",\n            \"secret_key\": \"SKCAPTUREHELD0000000000000000000000000000\",\n            \"active\": true,\n            \"create_date\": \"2026-10-08T10:04:54.456416Z\"\n        }\n    ],\n    \"swift_keys\": [],\n    \"caps\": [],\n    \"op_mask\": \"read, write, delete\",\n    \"default_placement\": \"\",\n    \"default_storage_class\": \"\",\n    \"placement_tags\": [],\n    \"bucket_quota\": {\n        \"enabled\": false,\n        \"check_on_raw\": false,\n        \"max_size\": -1,\n        \"max_size_kb\": 0,\n        \"max_objects\": -1\n    },\n    \"user_quota\": {\n        \"enabled\": false,\n        \"check_on_raw\": false,\n        \"max_size\": -1,\n        \"max_size_kb\": 0,\n        \"max_objects\": -1\n    },\n    \"temp_url_keys\": [],\n    \"type\": \"root\",\n    \"mfa_ids\": [],\n    \"account_id\": \"RGW90000000000000001\",\n    \"path\": \"/\",\n    \"create_date\": \"2026-10-08T10:04:54.456394Z\",\n    \"tags\": [],\n    \"group_ids\": []\n}\n\n",
+            "stderr": ""
+        },
+        {
+            "name": "user info by unknown key",
+            "via": "radosgw-admin",
+            "argv": [
+                "user",
+                "info",
+                "--access-key",
+                "AKCAPTUREUNKNOWN0000"
+            ],
+            "rc": 22,
+            "stdout": "",
+            "stderr": "user.init failed: (22) Invalid argument\n"
+        },
+        {
+            "name": "user info of a missing uid",
+            "via": "radosgw-admin",
+            "argv": [
+                "user",
+                "info",
+                "--uid",
+                "capturenobody",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 22,
+            "stdout": "",
+            "stderr": "could not fetch user info: no user info saved\n"
+        },
+        {
+            "name": "role list",
+            "via": "radosgw-admin",
+            "argv": [
+                "role",
+                "list",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 0,
+            "stdout": "[\n    {\n        \"RoleId\": \"e3b414e1-490b-4f3a-b4e9-749ab648e5e1\",\n        \"RoleName\": \"capture-reader\",\n        \"Path\": \"/\",\n        \"Arn\": \"arn:aws:iam::RGW90000000000000001:role/capture-reader\",\n        \"CreateDate\": \"2026-10-08T10:04:54.798Z\",\n        \"Description\": \"\",\n        \"MaxSessionDuration\": 3600,\n        \"AssumeRolePolicyDocument\": \"{\\\"Version\\\": \\\"2012-10-17\\\", \\\"Statement\\\": [{\\\"Effect\\\": \\\"Allow\\\", \\\"Action\\\": [\\\"sts:AssumeRoleWithWebIdentity\\\"], \\\"Principal\\\": {\\\"Federated\\\": [\\\"arn:aws:iam::RGW90000000000000001:oidc-provider/idp/realms/capture\\\"]}}]}\",\n        \"AccountId\": \"RGW90000000000000001\",\n        \"PermissionPolicies\": [\n            {\n                \"PolicyName\": \"tenant\",\n                \"PolicyValue\": \"{\\\"Version\\\": \\\"2012-10-17\\\", \\\"Statement\\\": [{\\\"Effect\\\": \\\"Allow\\\", \\\"Action\\\": [\\\"s3:GetObject\\\"], \\\"Resource\\\": [\\\"arn:aws:s3:::capture/*\\\"]}]}\"\n            }\n        ]\n    }\n]\n",
+            "stderr": ""
+        },
+        {
+            "name": "oidc-provider list",
+            "via": "radosgw-admin",
+            "argv": [
+                "oidc-provider",
+                "list",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 1,
+            "stdout": "",
+            "stderr": "ERROR: Unrecognized argument: 'oidc-provider'\nExpected one of the following:\n  account\n  bi\n  bilog\n  bucket\n  buckets\n  caps\n  data\n  datalog\n  gc\n  global\n  key\n  lc\n  log\n  mdlog\n  metadata\n  mfa\n  notification\n  object\n  objects\n  olh\n  orphans\n  period\n  policy\n  quota\n  ratelimit\n  realm\n  reshard\n  role\n  role-policy\n  role-trust-policy\n  script\n  script-package\n  subuser\n  sync\n  topic\n  usage\n  user\n  zone\n  zonegroup\n  zonegroups\n  zones\n"
+        },
+        {
+            "name": "config get",
+            "via": "ceph",
+            "argv": [
+                "config",
+                "get",
+                "client.rgw",
+                "rgw_s3_auth_use_sts"
+            ],
+            "rc": 0,
+            "stdout": "true\n",
+            "stderr": ""
+        },
+        {
+            "name": "list_buckets with an active held key",
+            "via": "s3",
+            "call": "list_buckets",
+            "params": {},
+            "access_key": "AKCAPTUREHELD0000000",
+            "code": "",
+            "status": 200
+        },
+        {
+            "name": "head_bucket with an active held key",
+            "via": "s3",
+            "call": "head_bucket",
+            "params": {
+                "Bucket": "capture-none"
+            },
+            "access_key": "AKCAPTUREHELD0000000",
+            "code": "404",
+            "status": 404
+        },
+        {
+            "name": "list_open_id_connect_providers with an active held key",
+            "via": "iam",
+            "call": "list_open_id_connect_providers",
+            "params": {},
+            "access_key": "AKCAPTUREHELD0000000",
+            "code": "",
+            "status": 200
+        },
+        {
+            "name": "list_user_policies with an active held key",
+            "via": "iam",
+            "call": "list_user_policies",
+            "params": {
+                "UserName": "captureroot"
+            },
+            "access_key": "AKCAPTUREHELD0000000",
+            "code": "",
+            "status": 200
+        },
+        {
+            "name": "list_buckets with an unknown key",
+            "via": "s3",
+            "call": "list_buckets",
+            "params": {},
+            "access_key": "AKCAPTUREUNKNOWN0000",
+            "code": "AccessDenied",
+            "status": 403
+        },
+        {
+            "name": "head_bucket with an unknown key",
+            "via": "s3",
+            "call": "head_bucket",
+            "params": {
+                "Bucket": "capture-none"
+            },
+            "access_key": "AKCAPTUREUNKNOWN0000",
+            "code": "403",
+            "status": 403
+        },
+        {
+            "name": "list_open_id_connect_providers with an unknown key",
+            "via": "iam",
+            "call": "list_open_id_connect_providers",
+            "params": {},
+            "access_key": "AKCAPTUREUNKNOWN0000",
+            "code": "AccessDenied",
+            "status": 403
+        },
+        {
+            "name": "list_user_policies with an unknown key",
+            "via": "iam",
+            "call": "list_user_policies",
+            "params": {
+                "UserName": "captureroot"
+            },
+            "access_key": "AKCAPTUREUNKNOWN0000",
+            "code": "AccessDenied",
+            "status": 403
+        },
+        {
+            "name": "user suspend",
+            "via": "radosgw-admin",
+            "argv": [
+                "user",
+                "suspend",
+                "--uid",
+                "captureroot",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 0,
+            "stdout": "{\n    \"user_id\": \"captureroot\",\n    \"display_name\": \"captureroot\",\n    \"email\": \"\",\n    \"suspended\": 1,\n    \"max_buckets\": 1000,\n    \"subusers\": [],\n    \"keys\": [\n        {\n            \"user\": \"captureroot\",\n            \"access_key\": \"AKCAPTUREHELD0000000\",\n            \"secret_key\": \"SKCAPTUREHELD0000000000000000000000000000\",\n            \"active\": true,\n            \"create_date\": \"2026-10-08T10:04:54.456416Z\"\n        }\n    ],\n    \"swift_keys\": [],\n    \"caps\": [],\n    \"op_mask\": \"read, write, delete\",\n    \"default_placement\": \"\",\n    \"default_storage_class\": \"\",\n    \"placement_tags\": [],\n    \"bucket_quota\": {\n        \"enabled\": false,\n        \"check_on_raw\": false,\n        \"max_size\": -1,\n        \"max_size_kb\": 0,\n        \"max_objects\": -1\n    },\n    \"user_quota\": {\n        \"enabled\": false,\n        \"check_on_raw\": false,\n        \"max_size\": -1,\n        \"max_size_kb\": 0,\n        \"max_objects\": -1\n    },\n    \"temp_url_keys\": [],\n    \"type\": \"root\",\n    \"mfa_ids\": [],\n    \"account_id\": \"RGW90000000000000001\",\n    \"path\": \"/\",\n    \"create_date\": \"2026-10-08T10:04:54.456394Z\",\n    \"tags\": [],\n    \"group_ids\": []\n}\n\n",
+            "stderr": ""
+        },
+        {
+            "name": "list_buckets with a suspended held key",
+            "via": "s3",
+            "call": "list_buckets",
+            "params": {},
+            "access_key": "AKCAPTUREHELD0000000",
+            "code": "UserSuspended",
+            "status": 403
+        },
+        {
+            "name": "head_bucket with a suspended held key",
+            "via": "s3",
+            "call": "head_bucket",
+            "params": {
+                "Bucket": "capture-none"
+            },
+            "access_key": "AKCAPTUREHELD0000000",
+            "code": "403",
+            "status": 403
+        },
+        {
+            "name": "list_open_id_connect_providers with a suspended held key",
+            "via": "iam",
+            "call": "list_open_id_connect_providers",
+            "params": {},
+            "access_key": "AKCAPTUREHELD0000000",
+            "code": "UserSuspended",
+            "status": 403
+        },
+        {
+            "name": "list_user_policies with a suspended held key",
+            "via": "iam",
+            "call": "list_user_policies",
+            "params": {
+                "UserName": "captureroot"
+            },
+            "access_key": "AKCAPTUREHELD0000000",
+            "code": "UserSuspended",
+            "status": 403
+        },
+        {
+            "name": "user enable",
+            "via": "radosgw-admin",
+            "argv": [
+                "user",
+                "enable",
+                "--uid",
+                "captureroot",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 0,
+            "stdout": "{\n    \"user_id\": \"captureroot\",\n    \"display_name\": \"captureroot\",\n    \"email\": \"\",\n    \"suspended\": 0,\n    \"max_buckets\": 1000,\n    \"subusers\": [],\n    \"keys\": [\n        {\n            \"user\": \"captureroot\",\n            \"access_key\": \"AKCAPTUREHELD0000000\",\n            \"secret_key\": \"SKCAPTUREHELD0000000000000000000000000000\",\n            \"active\": true,\n            \"create_date\": \"2026-10-08T10:04:54.456416Z\"\n        }\n    ],\n    \"swift_keys\": [],\n    \"caps\": [],\n    \"op_mask\": \"read, write, delete\",\n    \"default_placement\": \"\",\n    \"default_storage_class\": \"\",\n    \"placement_tags\": [],\n    \"bucket_quota\": {\n        \"enabled\": false,\n        \"check_on_raw\": false,\n        \"max_size\": -1,\n        \"max_size_kb\": 0,\n        \"max_objects\": -1\n    },\n    \"user_quota\": {\n        \"enabled\": false,\n        \"check_on_raw\": false,\n        \"max_size\": -1,\n        \"max_size_kb\": 0,\n        \"max_objects\": -1\n    },\n    \"temp_url_keys\": [],\n    \"type\": \"root\",\n    \"mfa_ids\": [],\n    \"account_id\": \"RGW90000000000000001\",\n    \"path\": \"/\",\n    \"create_date\": \"2026-10-08T10:04:54.456394Z\",\n    \"tags\": [],\n    \"group_ids\": []\n}\n\n",
+            "stderr": ""
+        },
+        {
+            "name": "role-policy delete",
+            "via": "radosgw-admin",
+            "argv": [
+                "role-policy",
+                "delete",
+                "--role-name",
+                "capture-reader",
+                "--account-id",
+                "RGW90000000000000001",
+                "--policy-name",
+                "tenant"
+            ],
+            "rc": 0,
+            "stdout": "Policy: tenant successfully deleted for role: capture-reader\n",
+            "stderr": ""
+        },
+        {
+            "name": "role delete",
+            "via": "radosgw-admin",
+            "argv": [
+                "role",
+                "delete",
+                "--role-name",
+                "capture-reader",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 0,
+            "stdout": "role: capture-reader successfully deleted\n",
+            "stderr": ""
+        },
+        {
+            "name": "user rm",
+            "via": "radosgw-admin",
+            "argv": [
+                "user",
+                "rm",
+                "--uid",
+                "captureroot",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 0,
+            "stdout": "",
+            "stderr": ""
+        },
+        {
+            "name": "account rm",
+            "via": "radosgw-admin",
+            "argv": [
+                "account",
+                "rm",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 0,
+            "stdout": "",
+            "stderr": ""
+        },
+        {
+            "name": "account get of a gone account",
+            "via": "radosgw-admin",
+            "argv": [
+                "account",
+                "get",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 2,
+            "stdout": "",
+            "stderr": "ERROR: failed to read account with (2) No such file or directory: \n"
+        },
+        {
+            "name": "user list of a gone account",
+            "via": "radosgw-admin",
+            "argv": [
+                "user",
+                "list",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 2,
+            "stdout": "",
+            "stderr": "ERROR: failed to load account\n"
+        },
+        {
+            "name": "role list of a gone account",
+            "via": "radosgw-admin",
+            "argv": [
+                "role",
+                "list",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 0,
+            "stdout": "[]\n",
+            "stderr": ""
+        },
+        {
+            "name": "user info by a gone key",
+            "via": "radosgw-admin",
+            "argv": [
+                "user",
+                "info",
+                "--access-key",
+                "AKCAPTUREHELD0000000"
+            ],
+            "rc": 22,
+            "stdout": "",
+            "stderr": "user.init failed: (22) Invalid argument\n"
+        },
+        {
+            "name": "user info in a gone account",
+            "via": "radosgw-admin",
+            "argv": [
+                "user",
+                "info",
+                "--uid",
+                "captureroot",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 22,
+            "stdout": "",
+            "stderr": "could not fetch user info: no user info saved\n"
+        },
+        {
+            "name": "user suspend of a gone user",
+            "via": "radosgw-admin",
+            "argv": [
+                "user",
+                "suspend",
+                "--uid",
+                "captureroot",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 2,
+            "stdout": "",
+            "stderr": "could not modify user: unable to modify user, user not found\n"
+        },
+        {
+            "name": "user rm of a gone user",
+            "via": "radosgw-admin",
+            "argv": [
+                "user",
+                "rm",
+                "--uid",
+                "captureroot",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 2,
+            "stdout": "",
+            "stderr": "could not remove user: unable to remove user, user does not exist\n"
+        },
+        {
+            "name": "key create for a gone user",
+            "via": "radosgw-admin",
+            "argv": [
+                "key",
+                "create",
+                "--uid",
+                "captureroot",
+                "--account-id",
+                "RGW90000000000000001",
+                "--access-key",
+                "AKCAPTUREHELD0000000",
+                "--secret-key",
+                "SKCAPTUREHELD0000000000000000000000000000"
+            ],
+            "rc": 22,
+            "stdout": "",
+            "stderr": "could not create key: unable to parse request, user info was not populated\n"
+        },
+        {
+            "name": "key rm of a gone user",
+            "via": "radosgw-admin",
+            "argv": [
+                "key",
+                "rm",
+                "--uid",
+                "captureroot",
+                "--account-id",
+                "RGW90000000000000001",
+                "--access-key",
+                "AKCAPTUREHELD0000000"
+            ],
+            "rc": 22,
+            "stdout": "",
+            "stderr": "could not remove key: unable to parse request, user info was not populated\n"
+        },
+        {
+            "name": "role-policy put on a gone role",
+            "via": "radosgw-admin",
+            "argv": [
+                "role-policy",
+                "put",
+                "--role-name",
+                "capture-reader",
+                "--account-id",
+                "RGW90000000000000001",
+                "--policy-name",
+                "tenant",
+                "--policy-doc",
+                "{\"Version\": \"2012-10-17\", \"Statement\": [{\"Effect\": \"Allow\", \"Action\": [\"s3:GetObject\"], \"Resource\": [\"arn:aws:s3:::capture/*\"]}]}"
+            ],
+            "rc": 2,
+            "stdout": "",
+            "stderr": "2026-10-08T10:05:05.456+0000 7fbd2c70a900  0 ERROR: failed reading role name from Role pool: capture-reader: (2) No such file or directory\n"
+        },
+        {
+            "name": "role delete of a gone role",
+            "via": "radosgw-admin",
+            "argv": [
+                "role",
+                "delete",
+                "--role-name",
+                "capture-reader",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 2,
+            "stdout": "",
+            "stderr": "2026-10-08T10:05:05.839+0000 7f6b62c37900  0 ERROR: failed reading role name from Role pool: capture-reader: (2) No such file or directory\n"
+        },
+        {
+            "name": "account modify of a gone account",
+            "via": "radosgw-admin",
+            "argv": [
+                "account",
+                "modify",
+                "--account-id",
+                "RGW90000000000000001",
+                "--max-roles",
+                "5"
+            ],
+            "rc": 2,
+            "stdout": "",
+            "stderr": "ERROR: failed to modify account with (2) No such file or directory: \n"
+        },
+        {
+            "name": "account rm of a gone account",
+            "via": "radosgw-admin",
+            "argv": [
+                "account",
+                "rm",
+                "--account-id",
+                "RGW90000000000000001"
+            ],
+            "rc": 2,
+            "stdout": "",
+            "stderr": "ERROR: failed to remove account with (2) No such file or directory: \n"
+        }
+    ]
+}

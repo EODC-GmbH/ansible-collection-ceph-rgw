@@ -1,0 +1,31 @@
+---
+# The three roles in the order they depend on each other, for converge_twice.sh.
+# Each play matches the example kayobe wrapper of the same role.
+# Run it through whatever normally supplies the rgw_* settings
+# (kayobe playbook run, or ansible-playbook with that inventory).
+- name: Converge RGW STS
+  hosts: "{{ rgw_converge_hosts | default('mons') }}"
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Apply rgw_sts
+      ansible.builtin.import_role:
+        name: underknowledge.ceph_rgw.rgw_sts
+
+- name: Converge RGW tenants
+  hosts: "{{ rgw_converge_hosts | default('mons') }}"
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Apply rgw_tenants
+      ansible.builtin.import_role:
+        name: underknowledge.ceph_rgw.rgw_tenants
+
+- name: Converge RGW IAM
+  hosts: "{{ rgw_converge_hosts | default('mons') }}"
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Apply rgw_iam
+      ansible.builtin.import_role:
+        name: underknowledge.ceph_rgw.rgw_iam

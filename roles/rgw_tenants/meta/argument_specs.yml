@@ -69,6 +69,15 @@ argument_specs:
             required: false
             default: false
             description: Per-tenant rgw_tenants_rotate_keys.
+          access_keys: &access_keys
+            type: list
+            elements: dict
+            required: false
+            description: Further keys of the user (on the tenant, its primary account-root user), each present (vaulted pair) or absent (access key only).
+            options:
+              access_key: {type: str, required: true, no_log: true, description: Access key id.}
+              secret_key: {type: str, required: false, no_log: true, description: Secret key. Required when present.}
+              state: {type: str, required: false, default: present, choices: [present, absent], description: absent removes the key.}
           limits:
             type: dict
             required: false
@@ -151,6 +160,7 @@ argument_specs:
                 required: false
                 default: false
                 description: Suspend the user, keeping its keys.
+              access_keys: *access_keys
           users:
             type: list
             elements: dict
@@ -187,6 +197,7 @@ argument_specs:
                 required: false
                 default: false
                 description: Suspend the user, keeping its keys.
+              access_keys: *access_keys
       rgw_tenants_oidc:
         type: dict
         required: false
@@ -210,7 +221,16 @@ argument_specs:
         type: bool
         required: false
         default: false
-        description: Gate for rolling every tenant's account-root S3 keys to the vaulted value.
+        description: Gate for rolling every tenant's user S3 keys (account-root, additional root, service) to the vaulted values.
+      rgw_tenants_limit:
+        type: list
+        elements: str
+        required: false
+        default: []
+        description: >-
+          Names of the tenants a run reconciles (provision and teardown); empty means all.
+          Every tenant is still validated and counts as managed for discover, report and
+          verify. A name no tenant has stops the run.
       rgw_tenants_allow_teardown:
         type: bool
         required: false
@@ -226,10 +246,6 @@ argument_specs:
         required: false
         default: true
         description: Remove root_users marked state=absent (buckets are account-owned and kept).
-      rgw_tenants_service_name:
-        type: str
-        required: false
-        description: cephadm RGW service to restart on OIDC change (default rgw.rgw).
       rgw_tenants_bootstrap_host:
         type: str
         required: false

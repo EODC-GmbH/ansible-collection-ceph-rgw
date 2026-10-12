@@ -39,30 +39,30 @@ def make_spec(users):
             "iam-delegate": {"scope": "delegated-iam", "actions": ["iam:CreateRole"]},
         },
         "baseline": ["account-list"],
-        "tenants": [{"name": "acme-data", "account_id": "RGW1", "users": users}],
+        "tenants": [{"name": "aviato-data", "account_id": "RGW1", "users": users}],
     }
 
 
 class ComposeUsers(unittest.TestCase):
 
     def test_name_is_the_documented_convention(self):
-        self.assertEqual(service_user_name("acme-data", "backup"), "iam-acme-data-svc-backup")
+        self.assertEqual(service_user_name("aviato-data", "backup"), "iam-aviato-data-svc-backup")
 
     def test_scoped_user_gets_the_role_shaped_policy(self):
         users = compose_users(make_spec([{"name": "backup", "capabilities": ["objects-read"],
-                                          "buckets": ["acme-data-logs"]}]))
+                                          "buckets": ["aviato-data-logs"]}]))
         self.assertEqual(len(users), 1)
         user = users[0]
-        self.assertEqual(user["name"], "iam-acme-data-svc-backup")
+        self.assertEqual(user["name"], "iam-aviato-data-svc-backup")
         self.assertEqual(user["capabilities"], ["account-list", "objects-read"])
         resources = [r for s in user["policy"]["Statement"] for r in s["Resource"]]
-        self.assertIn("arn:aws:s3:::acme-data-logs", resources)
-        self.assertIn("arn:aws:s3:::acme-data-logs/*", resources)
-        self.assertNotIn("arn:aws:s3:::acme-data-*", resources)
+        self.assertIn("arn:aws:s3:::aviato-data-logs", resources)
+        self.assertIn("arn:aws:s3:::aviato-data-logs/*", resources)
+        self.assertNotIn("arn:aws:s3:::aviato-data-*", resources)
 
     def test_unscoped_user_defaults_to_the_tenant_prefix(self):
         user = compose_users(make_spec([{"name": "etl", "capabilities": ["objects-read"]}]))[0]
-        self.assertEqual(user["buckets"], ["acme-data-*"])
+        self.assertEqual(user["buckets"], ["aviato-data-*"])
 
     def test_policy_matches_a_role_with_the_same_capabilities(self):
         spec = make_spec([{"name": "etl", "capabilities": ["objects-read"]}])
@@ -82,7 +82,7 @@ class ComposeUsers(unittest.TestCase):
 REJECT_CASES = [
     ([{"name": "a", "capabilities": ["nope"]}], "an unknown capability"),
     ([{"name": "a", "capabilities": ["iam-delegate"]}], "delegated IAM on a static key"),
-    ([{"name": "a", "capabilities": ["objects-read"], "buckets": ["globex-data"]}],
+    ([{"name": "a", "capabilities": ["objects-read"], "buckets": ["hooli-data"]}],
      "another tenant's bucket"),
     ([{"name": "a", "capabilities": ["bucket-create"], "prefixes": ["p/*"]}],
      "prefixes combined with bucket-create"),

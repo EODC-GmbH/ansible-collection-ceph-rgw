@@ -1,0 +1,54 @@
+---
+# Input checks shared by the generators.
+# Imported by rgw_new_tenant.yml and tasks/add_user.yml.
+#
+# Inputs:
+#   _rgw_gen_name_var   the variable holding the account name, e.g. rgw_new_tenant
+#   _rgw_gen_name_in    its value as received
+#   _rgw_gen_name       its canonical form (ceph_account_slug), '' when none was given
+#   _rgw_gen_user_var   optional: the variable holding a user name, for the hint below
+#
+# The account name is permanent (it drives the uid, vault key names, bucket prefix and ARNs),
+# so a name that needs canonicalizing, or an -e value cut at a space, stops the run.
+- name: Assert an account name was provided
+  ansible.builtin.assert:
+    quiet: true
+    that: _rgw_gen_name_in | default('') | string | length > 0
+    fail_msg: >-
+      No account name. Pass -e {{ _rgw_gen_name_var }}=<name> or answer the prompt.
+
+# `-e key=value` ends the value at the first space and Ansible keeps the rest as _raw_params,
+# so `-e rgw_new_tenant="Hooli Data"` arrives as 'Hooli' plus a stray 'Data'.
+- name: Assert no -e value was cut at a space
+  ansible.builtin.assert:
+    quiet: true
+    that: _raw_params is not defined
+    fail_msg: >-
+      -e key=value ends at the first space, so '{{ _raw_params | default('') }}' was dropped.
+      {{ ("A name with spaces needs JSON, e.g. -e '"
+          ~ ({_rgw_gen_user_var: 'Erika Schröder'} | to_json(ensure_ascii=False))
+          ~ "', or the prompt.")
+         if _rgw_gen_user_var is defined else
+         ("An account name has no spaces: if the dropped words belong to it, re-run with -e "
+          ~ _rgw_gen_name_var ~ '='
+          ~ ((_rgw_gen_name_in ~ ' ' ~ _raw_params) | underknowledge.ceph_rgw.ceph_account_slug)
+          ~ '.') if _raw_params is defined else '' }}
+
+- name: Assert the account name is valid
+  ansible.builtin.assert:
+    quiet: true
+    that: _rgw_gen_name | underknowledge.ceph_rgw.ceph_account_valid
+    fail_msg: >-
+      '{{ _rgw_gen_name_in }}' is not a valid account name:
+      it must be lowercase [a-z0-9-], at most 55 characters, e.g. raviga-data-prod.
+      No underscore: RGW rejects one in the <tenant>-<role> IAM role name.
+
+- name: Assert the account name needs no canonicalizing
+  ansible.builtin.assert:
+    quiet: true
+    that: _rgw_gen_name == (_rgw_gen_name_in | string)
+    fail_msg: >-
+      '{{ _rgw_gen_name_in }}' is not in canonical form; it would become '{{ _rgw_gen_name }}'.
+      The account name is permanent, so it is not changed for you.
+      Re-run with -e {{ _rgw_gen_name_var }}={{ _rgw_gen_name }}
+      if that is the name you want.

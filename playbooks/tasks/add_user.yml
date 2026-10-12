@@ -1,0 +1,162 @@
+---
+# Add one user to an existing tenant drop-in: generate its keys, vault-encrypt them,
+# and rewrite the file with the new list entry and its two !vault blocks.
+# Existing ciphertext is copied through unchanged.
+# Imported by rgw_add_root_user.yml (kind root: a root_users entry, iam-<tenant>-root-<slug>)
+# and rgw_add_service_user.yml (kind svc: a users entry, iam-<tenant>-svc-<slug>).
+#
+# Inputs, set as play vars by the importing playbook:
+#   _au_kind                 root or svc
+#   _au_tenant_var / _in     the tenant variable's name and value
+#   _au_user_var / _in       the user variable's name and value
+#   _au_output_dir           drop-in directory
+#   _au_vault_var / _file    the vault password file variable's name and value
+#   _au_capabilities         svc only: rgw_iam capability names
+- name: Add a user to the tenant drop-in
+  vars:
+    # Canonicalized the same way rgw_new_tenant does, so file and vault key names match.
+    # Both guarded so '' reaches the asserts instead of a filter error.
+    _au_tenant: >-
+      {{ (_au_tenant_in | underknowledge.ceph_rgw.ceph_account_slug)
+         if (_au_tenant_in | default('') | string | length > 0) else '' }}
+    _au_slug: >-
+      {{ (_au_user_in | underknowledge.ceph_rgw.ceph_descriptor)
+         if (_au_user_in | default('') | string | length > 0) else '' }}
+    _au_list: "{{ 'users' if _au_kind == 'svc' else 'root_users' }}"
+    _au_label: "{{ 'service user' if _au_kind == 'svc' else 'root user' }}"
+    _au_uid: >-
+      {{ (_au_slug | underknowledge.ceph_rgw.rgw_service_user_name(_au_tenant)) if _au_kind == 'svc'
+         else (_au_tenant | underknowledge.ceph_rgw.ceph_root_uid(_au_slug)) }}
+    _au_dropin: "{{ _au_output_dir }}/{{ _au_tenant }}.yml"
+    # Variable names cannot carry the tenant name's hyphens.
+    _au_var_tenant: "{{ _au_tenant | replace('-', '_') }}"
+    _au_var: "rgw_tenant_{{ _au_var_tenant }}"
+    _au_key_stem: "vault_rgw_tenants_{{ _au_var_tenant }}_{{ _au_kind }}_{{ _au_slug }}"
+  block:
+    - name: Check the inputs
+      ansible.builtin.import_tasks: check_inputs.yml
+      vars:
+        _rgw_gen_name_var: "{{ _au_tenant_var }}"
+        _rgw_gen_name_in: "{{ _au_tenant_in | default('') }}"
+        _rgw_gen_name: "{{ _au_tenant }}"
+        _rgw_gen_user_var: "{{ _au_user_var }}"
+
+    - name: Assert a user was provided
+      ansible.builtin.assert:
+        quiet: true
+        that: _au_user_in | default('') | string | length > 0
+        fail_msg: >-
+          No user name. Pass -e {{ _au_user_var }}=<name/label> or answer the prompt.
+
+    - name: Resolve the vault password
+      ansible.builtin.import_tasks: vault_id.yml
+      vars:
+        _rgw_gen_vault_password_file: "{{ _au_vault_file | default('', true) }}"
+        _rgw_gen_vault_input_var: "{{ _au_vault_var }}"
+
+    - name: Check for the tenant drop-in
+      ansible.builtin.stat:
+        path: "{{ _au_dropin }}"
+      register: _au_stat
+
+    - name: Assert the drop-in exists
+      ansible.builtin.assert:
+        quiet: true
+        that: _au_stat.stat.exists
+        fail_msg: >-
+          {{ _au_dropin }} not found.
+          A {{ _au_label }} can only be added to an existing tenant;
+          run ansible-playbook playbooks/rgw_new_tenant.yml -e rgw_new_tenant={{ _au_tenant }} first.
+
+    # The vault region starts at the first column-0 `vault_` key:
+    # all config is indented under the tenant key.
+    # It is copied through verbatim.
+    # from_yaml leaves a templated value such as max_size: "{{ 500 * 1024 ** 3 }}" unrendered;
+    # include_vars would render it.
+    - name: Read the drop-in
+      ansible.builtin.set_fact:
+        _au_vault_region: "{{ _au_raw | regex_search('(?ms)^vault_.*\\Z') | default('', true) }}"
+        _au_config: "{{ _au_raw | regex_replace('(?ms)^vault_.*\\Z', '') | from_yaml | default({}, true) }}"
+      vars:
+        _au_raw: "{{ lookup('ansible.builtin.file', _au_dropin) }}"
+
+    - name: Assert the drop-in holds the expected tenant entry
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - _au_var in _au_config
+          - _au_config[_au_var].name | default('') == _au_tenant
+          - _au_vault_region | length > 0
+          - "'vault_rgw_tenants_' ~ _au_var_tenant ~ '_access_key' in _au_vault_region"
+        fail_msg: >-
+          {{ _au_dropin }} does not define {{ _au_var }} with name {{ _au_tenant }}
+          followed by its vault keys;
+          it does not look like an rgw_new_tenant-generated drop-in for this tenant.
+          Refusing to edit it.
+
+    - name: Stop if the user already exists
+      when: _au_slug in (_au_config[_au_var][_au_list] | default([]) | map(attribute='name'))
+      block:
+        - name: Report the existing user (nothing to do)
+          ansible.builtin.debug:
+            msg: "{{ _au_uid }} already declared in {{ _au_dropin }}; nothing to do."
+        - name: End the play
+          ansible.builtin.meta: end_play
+
+    # An entry removed by hand with its vault blocks left behind
+    # would otherwise get a second, duplicate key.
+    - name: Assert the new user's vault keys are not already in the file
+      ansible.builtin.assert:
+        quiet: true
+        that: (_au_key_stem ~ '_access_key') not in _au_vault_region and (_au_key_stem ~ '_secret_key') not in _au_vault_region
+        fail_msg: >-
+          {{ _au_dropin }} already holds {{ _au_key_stem }}_access_key or _secret_key
+          without a matching {{ _au_list }} entry.
+          Remove the stale vault blocks and re-run.
+
+    - name: Assert the service user name fits IAM's 64-character limit
+      ansible.builtin.assert:
+        quiet: true
+        that: _au_uid | length <= 64
+        fail_msg: >-
+          {{ _au_uid }} is {{ _au_uid | length }} characters;
+          IAM user names are limited to 64, and rgw_tenants would refuse the entry.
+          Use a shorter name.
+      when: _au_kind == 'svc'
+
+    - name: Generate the keys
+      ansible.builtin.import_tasks: encrypt_keys.yml
+      vars:
+        _rgw_gen_key_stems: ["{{ _au_key_stem }}"]
+
+    # Rendered by the same template rgw_new_tenant uses,
+    # so the diff is the new list item and the two new vault blocks.
+    - name: Write the drop-in back with the new user merged in
+      ansible.builtin.template:
+        src: templates/tenant_dropin.yml.j2
+        dest: "{{ _au_dropin }}"
+        mode: "0600"
+      vars:
+        _au_entry: "{{ _au_config[_au_var] }}"
+        _au_new: >-
+          {{ {'name': _au_slug, 'capabilities': _au_capabilities | default([], true)}
+             if _au_kind == 'svc' else {'name': _au_slug} }}
+        _dropin_var: "{{ _au_var }}"
+        _dropin_entry: "{{ _au_entry | combine({_au_list: (_au_entry[_au_list] | default([])) + [_au_new]}) }}"
+        _dropin_vault: "{{ _au_vault_region | trim }}\n{{ _rgw_gen_vault_text }}"
+
+    - name: Report what was added
+      ansible.builtin.debug:
+        msg:
+          - "tenant:       {{ _au_tenant }}  ({{ _au_config[_au_var].account_id }})"
+          - "{{ '%-13s' | format(_au_label ~ ':') }} {{ _au_uid }}"
+          - "slug:         {{ _au_slug }}  (from '{{ _au_user_in }}')"
+          - "vault keys:   {{ _au_key_stem }}_access_key / _secret_key"
+          - "drop-in:      {{ _au_dropin }}"
+          - "{{ _au_caps_note }}next: review, commit, run rgw_tenants to create the user{{ _au_iam_note }}."
+      vars:
+        _au_caps_note: >-
+          {{ ('capabilities: ' ~ (_au_capabilities | default([], true) | join(', ')
+              or 'none; the user can only list buckets until you add some') ~ '. ')
+             if _au_kind == 'svc' else '' }}
+        _au_iam_note: "{{ ' and rgw_iam to put its policy' if _au_kind == 'svc' else '' }}"

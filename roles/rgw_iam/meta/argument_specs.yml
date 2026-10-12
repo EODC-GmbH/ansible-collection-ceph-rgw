@@ -21,13 +21,22 @@ argument_specs:
         description: >-
           Drop-in tenant directory, default rgw_tenants_dir. Merged by name with
           rgw_tenants_list and rgw_iam_tenants.
+      rgw_iam_limit:
+        type: list
+        elements: str
+        required: false
+        description: >-
+          Names of the tenants a run reconciles, default rgw_tenants_limit; empty means
+          all. A name no tenant has stops the run.
       rgw_iam_tenants:
         type: list
         elements: dict
         required: false
         description: >-
-          Tenants to reconcile, in the rgw_tenants entry format (validated by that role's
-          spec). Reads name, account_id, roles, users, session_duration and limits.
+          Tenants to reconcile, in the rgw_tenants entry format. rgw_tenants validates them;
+          this role does not.
+          Reads name, account_id, root_user, bucket_prefix, roles, users, session_duration,
+          limits and rotate_keys.
       rgw_iam_provider_url:
         type: str
         required: false
@@ -35,7 +44,18 @@ argument_specs:
       rgw_iam_grant_claim:
         type: str
         required: false
-        description: The multivalued claim carrying "<tenant>:<role>" grants (default ceph_grants).
+        description: >-
+          The multivalued claim carrying a user's grant group paths
+          "<rgw_iam_grant_root>/<tenant>/<role>" (default s3iam).
+      rgw_iam_grant_root:
+        type: str
+        required: false
+        default: /services/s3
+        description: >-
+          Root of the grant group tree.
+          A grant is the path "<rgw_iam_grant_root>/<tenant>/<role>",
+          which the trust policy matches verbatim.
+          Must start with "/" and must not end with one.
       rgw_iam_policy_name:
         type: str
         required: false
@@ -76,11 +96,6 @@ argument_specs:
         type: str
         required: false
         description: PEM CA bundle on the bootstrap host for the endpoint. Defaults to rgw_tenants_ca_bundle.
-      rgw_iam_dry_run:
-        type: bool
-        required: false
-        default: false
-        description: Deprecated alias for --check.
       rgw_iam_prune:
         type: bool
         required: false

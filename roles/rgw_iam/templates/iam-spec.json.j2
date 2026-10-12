@@ -4,9 +4,10 @@
     without a cluster.
 
     Only the tenant keys this role uses are projected, so an unrelated edit in a drop-in
-    does not rewrite this file and report a spurious change. -#}
+    does not change the spec and report a spurious change. -#}
 {
   "grant_claim": {{ rgw_iam_grant_claim | to_json }},
+  "grant_root": {{ rgw_iam_grant_root | to_json }},
   "delegated_infix": {{ rgw_iam_delegated_infix | to_json }},
   "provider_host": {{ rgw_iam_provider_url | regex_replace('^https?://', '') | to_json }},
   "policy_name": {{ rgw_iam_policy_name | to_json }},

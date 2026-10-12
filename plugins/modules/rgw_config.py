@@ -11,7 +11,7 @@ DOCUMENTATION = r"""
 ---
 module: rgw_config
 short_description: Set one Ceph cluster configuration option, on drift only
-version_added: "0.2.0"
+version_added: "0.3.0"
 description:
   - Reads C(ceph config get <who> <option>) and runs C(ceph config set) only when the
     stored value differs, so a converge that changes nothing reports nothing and no

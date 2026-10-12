@@ -1,0 +1,29 @@
+---
+# Record this cluster's answers for tests/unit/fixtures, through capture_rgw.sh.
+# Creates and removes the throwaway account rgw_capture_account_id;
+# it fails rather than touch an account that already exists.
+- name: Capture radosgw-admin and S3/IAM answers
+  hosts: "{{ rgw_converge_hosts | default('mons') }}"
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Run the capture on one host
+      rgw_capture:
+        account_id: "{{ rgw_capture_account_id | default('RGW90000000000000001') }}"
+        endpoint_url: "{{ rgw_tenants_endpoint }}"
+        validate_certs: false
+        fsid: "{{ rgw_tenants_fsid | default(omit, true) }}"
+      register: rgw_capture_result
+      when: inventory_hostname == ansible_play_hosts[0]
+
+    - name: Write the transcript
+      ansible.builtin.copy:
+        content: >-
+          {{ {'version': rgw_capture_result.version, 'release': rgw_capture_result.release,
+              'account_id': rgw_capture_result.account_id, 'steps': rgw_capture_result.steps}
+             | to_nice_json(sort_keys=false) }}
+        dest: "{{ rgw_capture_out }}/{{ rgw_capture_result.release }}.json"
+        mode: "0644"
+      delegate_to: localhost
+      become: false
+      when: inventory_hostname == ansible_play_hosts[0]

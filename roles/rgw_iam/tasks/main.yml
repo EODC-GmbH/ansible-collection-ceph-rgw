@@ -32,10 +32,36 @@
          + (_rgw_iam_dropins | default([])) }}
     _rgw_iam_uniq: "{{ dict(_rgw_iam_seen | map(attribute='name') | zip(_rgw_iam_seen)).values() | list }}"
 
+# A misspelt name would otherwise reconcile nothing and report success.
+- name: Refuse a limit naming an unknown tenant
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - rgw_iam_limit is not string
+      - _rgw_iam_unknown | length == 0
+    fail_msg: >-
+      {% if rgw_iam_limit is string %}rgw_iam_limit must be a list of tenant names,
+      as in -e '{"rgw_iam_limit": ["{{ rgw_iam_limit }}"]}'.
+      {% else %}rgw_iam_limit names {{ _rgw_iam_unknown }}, which no drop-in, rgw_tenants_list or
+      rgw_iam_tenants entry declares.{% endif %}
+  vars:
+    _rgw_iam_seen: >-
+      {{ (rgw_iam_tenants | default([], true))
+         + (rgw_tenants_list | default([], true))
+         + (_rgw_iam_dropins | default([])) }}
+    _rgw_iam_unknown: "{{ rgw_iam_limit | difference(_rgw_iam_seen | map(attribute='name')) }}"
+  when: rgw_iam_limit | length > 0
+
+- name: Narrow the tenant list to rgw_iam_limit
+  ansible.builtin.set_fact:
+    rgw_iam_tenants: "{{ rgw_iam_tenants | selectattr('name', 'in', rgw_iam_limit) | list }}"
+  when: rgw_iam_limit | length > 0
+
 - name: Report that there is nothing to reconcile
   ansible.builtin.debug:
     msg: >-
-      No tenants found, so there are no IAM roles to reconcile. Set rgw_iam_dir to the
+      No tenants{{ ' left after rgw_iam_limit ' ~ rgw_iam_limit if rgw_iam_limit | length > 0 else ' found' }},
+      so there are no IAM roles to reconcile. Set rgw_iam_dir to the
       drop-in directory (it defaults to rgw_tenants_dir), or define rgw_tenants_list /
       rgw_iam_tenants inline, if that is unexpected.
   when: rgw_iam_tenants | length == 0
@@ -58,6 +84,19 @@
       unmatchable and every assume fails with a bare AccessDenied.
     quiet: true
 
+- name: Assert the grant root starts with a slash and has no trailing slash
+  ansible.builtin.assert:
+    that:
+      - rgw_iam_grant_root.startswith('/')
+      - rgw_iam_grant_root == '/' or not rgw_iam_grant_root.endswith('/')
+    fail_msg: >-
+      rgw_iam_grant_root is '{{ rgw_iam_grant_root }}'.
+      It must start with '/' and must not end in one:
+      the trust condition matches the group path '{{ rgw_iam_grant_root }}/<tenant>/<role>' verbatim,
+      so a missing leading slash or a trailing one makes it unmatchable
+      and every assume fails with a bare AccessDenied.
+    quiet: true
+
 - name: Build the desired IAM spec
   ansible.builtin.set_fact:
     _rgw_iam_spec: "{{ _rgw_iam_rendered if _rgw_iam_rendered is mapping else _rgw_iam_rendered | from_json }}"
@@ -69,7 +108,6 @@
     spec: "{{ _rgw_iam_spec }}"
     prune: "{{ rgw_iam_prune | bool }}"
     fsid: "{{ rgw_iam_fsid | default(omit, true) }}"
-  check_mode: "{{ true if (rgw_iam_dry_run | bool) else omit }}"
   register: rgw_iam_sync_reg
   become: true
   when: inventory_hostname == rgw_iam_bootstrap_host
@@ -77,6 +115,12 @@
 - name: Report what the reconciler did
   ansible.builtin.debug:
     msg: "{{ rgw_iam_sync_reg.actions | default([]) }}"
+  when: inventory_hostname == rgw_iam_bootstrap_host
+
+# The collection does not create these groups.
+- name: Report the grant group paths the IdP must provide
+  ansible.builtin.debug:
+    msg: "{{ rgw_iam_sync_reg.required_groups | default([]) }}"
   when: inventory_hostname == rgw_iam_bootstrap_host
 
 # Put through the IAM API: squid's radosgw-admin can only attach its six Resource "*"
@@ -94,6 +138,94 @@
     quiet: true
   when: _rgw_iam_users | length > 0
 
+# rgw_sts may have just restarted RGW, which reports running before it listens.
+- name: Wait for the RGW endpoint to answer
+  ansible.builtin.uri:
+    url: "{{ rgw_iam_endpoint }}"
+    method: GET
+    status_code: [200, 403, 405]
+    validate_certs: false
+  register: rgw_iam_endpoint_reg
+  until: rgw_iam_endpoint_reg.status in [200, 403, 405]
+  retries: 30
+  delay: 5
+  # Read-only, and the previews below need the endpoint.
+  check_mode: false
+  when:
+    - _rgw_iam_users | length > 0
+    - inventory_hostname == rgw_iam_bootstrap_host
+
+# A vault/cluster key mismatch otherwise surfaces as a bare AccessDenied from IAM.
+# Check mode because rgw_tenants owns the root user.
+- name: Compare the vaulted account-root keys with the cluster
+  underknowledge.ceph_rgw.rgw_account_user:
+    uid: "{{ item.root_user | default(item.name ~ 'root') }}"
+    account_id: "{{ item.account_id }}"
+    access_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_access_key') }}"
+    secret_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_secret_key') }}"
+    check_identity: false
+    fsid: "{{ rgw_iam_fsid | default(omit, true) }}"
+  loop: "{{ rgw_iam_tenants | selectattr('name', 'in', _rgw_iam_users | map(attribute='tenant') | list) | list }}"
+  loop_control:
+    label: "{{ item.root_user | default(item.name ~ 'root') }}"
+  register: _rgw_iam_keys
+  check_mode: true
+  changed_when: false
+  become: true
+  when: inventory_hostname == rgw_iam_bootstrap_host
+
+# The probe returns no `user` for a missing root user.
+- name: List tenants whose service-user policy preview is skipped
+  ansible.builtin.set_fact:
+    _rgw_iam_preview_skipped: "{{ (_uncreated + (_rotating | map(attribute='name') | list)) | unique if ansible_check_mode else [] }}"
+  vars:
+    _uncreated: >-
+      {{ _rgw_iam_keys.results | default([]) | rejectattr('user', 'defined')
+         | selectattr('keys_match', 'defined') | selectattr('keys_match', 'none')
+         | map(attribute='item.name') | list }}
+    _mismatched: >-
+      {{ _rgw_iam_keys.results | default([]) | selectattr('keys_match', 'defined')
+         | selectattr('keys_match', 'sameas', false) | map(attribute='item') | list }}
+    _rotating: >-
+      {{ _mismatched if (rgw_tenants_rotate_keys | default(false) | bool)
+         else _mismatched | selectattr('rotate_keys', 'defined') | selectattr('rotate_keys') | list }}
+  when: inventory_hostname == rgw_iam_bootstrap_host
+
+- name: Stop when a tenant's vaulted keys do not match the cluster
+  ansible.builtin.assert:
+    quiet: true
+    that: item.keys_match is sameas true or item.item.name in _rgw_iam_preview_skipped
+    fail_msg: >-
+      {% if item.keys_match is none %}account-root user
+      {{ item.item.root_user | default(item.item.name ~ 'root') }}
+      was not found in {{ item.item.account_id }}.
+      Run rgw_tenants for {{ item.item.name }} first.
+      {% else %}{% if item.user.access_key_ids | default(['?']) | length == 0 %}
+      {{ item.item.root_user | default(item.item.name ~ 'root') }}
+      holds no key on the cluster, so the vaulted pair cannot match;
+      a key removed by hand is not put back on its own, in case it was revoked on purpose.
+      {% else %}vault keys for {{ item.item.name }}
+      do not match the cluster's keys for {{ item.item.root_user | default(item.item.name ~ 'root') }}.{% endif %}
+      Run rgw_tenants with rotate_keys: true on this tenant
+      to move the cluster onto the vaulted pair,
+      or restore the previous
+      vault_rgw_tenants_{{ item.item.name | replace('-', '_') }}_access_key/_secret_key.
+      {% endif %}
+  loop: "{{ _rgw_iam_keys.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: inventory_hostname == rgw_iam_bootstrap_host
+
+- name: Report tenants whose service-user policy preview is skipped
+  ansible.builtin.debug:
+    msg: >-
+      {{ _rgw_iam_preview_skipped }}: account-root user not created yet, or key rotation pending,
+      so this preview cannot read their service-user policies.
+      Those are skipped.
+  when:
+    - _rgw_iam_preview_skipped | default([]) | length > 0
+    - inventory_hostname == rgw_iam_bootstrap_host
+
 - name: Reconcile service-user policies
   underknowledge.ceph_rgw.rgw_user_policy:
     user_name: "{{ item.name }}"
@@ -106,12 +238,15 @@
     ca_bundle: "{{ rgw_iam_ca_bundle | default(omit, true) }}"
     access_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.tenant | replace('-', '_')) ~ '_access_key') }}"
     secret_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.tenant | replace('-', '_')) ~ '_secret_key') }}"
-  check_mode: "{{ true if (rgw_iam_dry_run | bool) else omit }}"
+    fsid: "{{ rgw_iam_fsid | default(omit, true) }}"
   loop: "{{ _rgw_iam_users }}"
   loop_control:
     label: "{{ item.name }}"
   register: rgw_iam_users_reg
-  when: inventory_hostname == rgw_iam_bootstrap_host
+  become: true
+  when:
+    - item.tenant not in _rgw_iam_preview_skipped | default([])
+    - inventory_hostname == rgw_iam_bootstrap_host
 
 - name: Report what the service-user reconcile did
   ansible.builtin.debug:

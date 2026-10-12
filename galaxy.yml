@@ -2,7 +2,7 @@
 # Pulled by kayobe as a git source, the same way it pulls ansible-collection-cephadm.
 namespace: underknowledge
 name: ceph_rgw
-version: 0.3.0
+version: 0.7.0
 readme: README.md
 authors:
   - Underknowledge
@@ -31,3 +31,6 @@ build_ignore:
   - "*.tar.gz"
   - "__pycache__"
   - "*.pyc"
+  - .pytest_cache
+  # Live-cluster test tooling; it stays in the repository.
+  - tests/integration

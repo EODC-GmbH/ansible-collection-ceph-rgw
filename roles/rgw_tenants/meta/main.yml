@@ -3,7 +3,7 @@ galaxy_info:
   role_name: rgw_tenants
   namespace: underknowledge
   author: Underknowledge
-  description: OIDC-federated, per-tenant S3 on Ceph RGW (accounts, roles, OIDC providers, buckets).
+  description: Per-tenant S3 on Ceph RGW (accounts, account-root and service users, OIDC providers, buckets).
   license: Apache-2.0
   min_ansible_version: "2.15"
   platforms:

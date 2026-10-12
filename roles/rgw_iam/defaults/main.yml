@@ -2,8 +2,9 @@
 # rgw_iam: the IAM roles a federated user assumes inside a tenant account. Run after
 # rgw_tenants, which creates the accounts and their OIDC providers.
 #
-# A user holds grants "<tenant>:<role>" in one multivalued OIDC claim; each grant selects
-# one IAM role in one account.
+# A user holds grants in one multivalued OIDC claim.
+# Each grant is the path of a group the user is a member of, "<rgw_iam_grant_root>/<tenant>/<role>",
+# and selects one IAM role in one account.
 
 # Host owning the cephadm bootstrap keyring; all radosgw-admin work runs there.
 rgw_iam_bootstrap_host: "{{ groups['mons'][0] }}"
@@ -13,15 +14,24 @@ rgw_iam_fsid: ""
 # Drop-in tenant directory, the same one rgw_tenants loads, so this role also runs alone.
 # Tenants already in rgw_tenants_list are merged in by name.
 rgw_iam_dir: "{{ rgw_tenants_dir | default('') }}"
+# Tenant names a run reconciles; empty means all. Prune acts per reconciled tenant, so
+# the others' roles are left alone.
+rgw_iam_limit: "{{ rgw_tenants_limit | default([]) }}"
 rgw_iam_tenants: []
 
 # The OIDC issuer registered with each account by rgw_tenants. Must match the token's iss
 # exactly, without a trailing slash.
 rgw_iam_provider_url: "{{ rgw_tenants_oidc.provider_url | default('') }}"
 
-# The claim carrying a user's grants as "<tenant>:<role>" strings. The IdP must emit
-# exactly this name, or every assume fails with AccessDenied.
-rgw_iam_grant_claim: ceph_grants
+# The claim carrying a user's grants as group paths.
+# The IdP must emit this claim name, or every assume fails with AccessDenied.
+rgw_iam_grant_claim: s3iam
+
+# Root of the grant group tree.
+# A grant is the path "<rgw_iam_grant_root>/<tenant>/<role>" of a group the user belongs to,
+# and the trust policy matches that string verbatim.
+# Must start with "/" and must not end with one.
+rgw_iam_grant_root: /services/s3
 
 # Name of the inline policy this role puts on each platform role. Any other inline policy
 # on a platform role is reported (and removed under rgw_iam_prune).
@@ -48,9 +58,6 @@ rgw_iam_endpoint: "{{ rgw_tenants_endpoint | default('') }}"
 rgw_iam_s3_region: "{{ rgw_tenants_s3_region | default('us-east-1') }}"
 rgw_iam_validate_certs: "{{ rgw_tenants_validate_certs | default(true) }}"
 rgw_iam_ca_bundle: "{{ rgw_tenants_ca_bundle | default('') }}"
-
-# Deprecated alias for --check.
-rgw_iam_dry_run: false
 
 # Remove platform-namespace roles no longer in config and inline policies this role did
 # not put there, and rebuild a role tagged out of band. Never touches <tenant>-x-* roles.

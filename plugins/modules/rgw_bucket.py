@@ -11,7 +11,7 @@ DOCUMENTATION = r"""
 ---
 module: rgw_bucket
 short_description: Manage a Ceph RGW tenant's S3 buckets with its account-root keys
-version_added: "0.2.0"
+version_added: "0.3.0"
 description:
   - Creates or removes the S3 buckets of one RGW account, one task for the whole set.
   - Buckets belong to a user in RGW, so they are made over S3 with the tenant's
@@ -65,6 +65,32 @@ options:
         the module. Needed when RGW serves a certificate from a private CA.
       - Takes precedence over O(validate_certs) when set.
     type: path
+  exec_mode:
+    description:
+      - How to reach C(radosgw-admin).
+        The module calls it only after S3 refuses the keys,
+        to see whether any user holds the access key.
+    type: str
+    choices: [auto, native, container, cephadm]
+    default: auto
+  fsid:
+    description: Cluster fsid.
+      Read from C(/etc/ceph/ceph.conf) when not given.
+    type: str
+  image:
+    description: Ceph container image.
+    type: str
+  container_runtime:
+    description: Container runtime to use.
+    type: str
+    choices: [docker, podman]
+  cluster:
+    description: Ceph cluster name.
+    type: str
+    default: ceph
+  keyring:
+    description: Path to a ceph keyring.
+    type: str
 requirements:
   - boto3
 notes:
@@ -74,9 +100,13 @@ notes:
   - O(purge_objects) deletes current object versions only. A versioned bucket with
     non-current versions or delete markers still fails with C(BucketNotEmpty); remove it
     with C(radosgw-admin bucket rm --purge-objects).
-  - When the credentials are rejected outright, the account-root user does not exist.
-    Check mode then reports the create it would do, and O(state=absent) reports the
-    buckets as already gone, instead of failing.
+  - RGW answers C(AccessDenied) both for an unknown key and for a user without permission.
+    After a refusal the module runs C(radosgw-admin user info --access-key)
+    to see whether any user holds the key,
+    which needs the cluster admin keyring (use C(become)).
+    If none does, check mode reports the create it would do
+    and O(state=absent) reports the buckets as gone.
+    Otherwise the task fails.
 author:
   - Underknowledge (@Underknowledge)
 """
@@ -95,10 +125,10 @@ EXAMPLES = r"""
 
 - name: Remove a decommissioned tenant's bucket and everything in it
   underknowledge.ceph_rgw.rgw_bucket:
-    name: acme-backups
+    name: aviato-backups
     endpoint_url: "{{ rgw_tenants_endpoint }}"
-    access_key: "{{ vault_rgw_tenants_acme_access_key }}"
-    secret_key: "{{ vault_rgw_tenants_acme_secret_key }}"
+    access_key: "{{ vault_rgw_tenants_aviato_access_key }}"
+    secret_key: "{{ vault_rgw_tenants_aviato_secret_key }}"
     state: absent
     purge_objects: true
 """
@@ -124,12 +154,12 @@ buckets:
       description: Objects removed by O(purge_objects).
       type: int
   sample:
-    - {name: acme-data, result: created, changed: true}
-    - {name: acme-logs, result: exists, changed: false}
+    - {name: aviato-data, result: created, changed: true}
+    - {name: aviato-logs, result: exists, changed: false}
 probed:
   description:
-    - Whether the S3 endpoint was actually queried. False when the credentials were
-      rejected in check mode or with O(state=absent).
+    - Whether the S3 endpoint was queried.
+      False when no user holds the access key, in check mode or with O(state=absent).
   returned: always
   type: bool
   sample: true
@@ -137,7 +167,12 @@ probed:
 
 from ansible.module_utils.basic import AnsibleModule, missing_required_lib
 
-from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw import diff_of
+from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw import (
+    RGW, RGW_COMMON_ARGS, diff_of,
+)
+from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw_refusal import (
+    REFUSED_CODES, error_code, exit_if_suspended_preview, key_holder, refused_msg,
+)
 
 try:
     import boto3
@@ -151,31 +186,19 @@ else:
 ABSENT_CODES = ("404", "NoSuchBucket")
 # Bucket names are cluster-global, so a 403 on HeadBucket means another account holds it.
 OWNED_ELSEWHERE_CODES = ("403", "AccessDenied", "Forbidden")
-# The account-root user behind access_key does not exist: on a greenfield tenant that is a
-# missing prerequisite rather than a failure.
-NO_ACCOUNT_CODES = ("InvalidAccessKeyId", "SignatureDoesNotMatch")
 DELETE_BATCH = 1000
 
 
 class ProbeError(Exception):
     """A probe answer to surface instead of acting on.
 
-    prerequisite is true when the credentials themselves were rejected.
+    refused holds the error code when S3 refused the credentials, else None.
     """
 
-    def __init__(self, msg, prerequisite=False):
+    def __init__(self, msg, refused=None):
         super(ProbeError, self).__init__(msg)
         self.msg = msg
-        self.prerequisite = prerequisite
-
-
-def error_code(exc):
-    """The S3 error code of a ClientError, falling back to the HTTP status."""
-    response = getattr(exc, "response", None) or {}
-    code = (response.get("Error") or {}).get("Code") or ""
-    if not code:
-        code = str((response.get("ResponseMetadata") or {}).get("HTTPStatusCode") or "")
-    return code
+        self.refused = refused
 
 
 def http_status(exc):
@@ -186,19 +209,20 @@ def http_status(exc):
 def owned_buckets(client):
     """The names this account owns, as one ListBuckets.
 
-    Also the credential check, and it has to come first. HeadBucket is a HEAD request, so
-    a failure carries no body and no S3 error code, and RGW answers 403 both for a key
-    that does not exist and for a name another account holds. ListBuckets is a GET, so its
-    error code tells a greenfield tenant apart from a name collision.
+    Also the credential check, and it has to come first.
+    HeadBucket is a HEAD request, so a failure carries no body and no S3 error code,
+    and RGW answers 403 both for a key that does not exist and for a name another account holds.
+    ListBuckets is a GET and names no bucket, so a refusal there is about the credentials.
     """
     try:
         listing = client.list_buckets()
     except ClientError as exc:
         code = error_code(exc)
-        if code in NO_ACCOUNT_CODES or http_status(exc) == 403:
-            raise ProbeError(
-                "S3 rejected the credentials (%s); the account-root user for this "
-                "access key does not exist" % code, prerequisite=True)
+        # Squid answers AccessDenied for an unknown key and UserSuspended for a suspended
+        # user. Other 403 codes (RequestTimeTooSkewed) come from a user that exists.
+        if code in REFUSED_CODES:
+            raise ProbeError("ListBuckets at this endpoint was refused (%s)" % code,
+                             refused=code)
         raise ProbeError("ListBuckets at this endpoint failed (%s): %s" % (code, exc))
     except BotoCoreError as exc:
         raise ProbeError("ListBuckets at this endpoint failed: %s" % exc)
@@ -246,19 +270,18 @@ def purge_objects(client, name):
 
 
 def unprobed_exit(module, names, state, detail=""):
-    """The credentials did not authenticate. Report the intent rather than failing.
+    """S3 refused a key no user holds: report the intent and exit.
 
-    Check mode on a greenfield tenant, where the account-root user does not exist yet, or
-    delete mode on a torn-down one, where it is gone and its buckets with it. Failing the
-    latter would make teardown one-shot: it revokes these very keys, so a re-run could
-    never get past this step.
+    Check mode on a greenfield tenant, where the account-root user does not exist yet,
+    or delete mode on a torn-down one, where it is gone and its buckets with it.
+    Teardown revokes these keys, so a re-run reaches this step without them.
     """
     would_create = state == "present"
     if would_create:
         msg = "would create; prerequisite account-root user for this access key absent, not probed"
     else:
-        msg = ("the account-root user for this access key is gone (%s), and its buckets with it"
-               % (detail or "credentials rejected"))
+        msg = ("S3 answered %s and no RGW user holds this access key, so the account-root "
+               "user is gone, and its buckets with it" % (detail or "a refusal"))
     module.exit_json(
         changed=would_create,
         probed=False,
@@ -284,6 +307,7 @@ def main():
         validate_certs=dict(type="bool", default=True),
         ca_bundle=dict(type="path"),
     )
+    argument_spec.update(RGW_COMMON_ARGS)
 
     module = AnsibleModule(
         argument_spec=argument_spec,
@@ -324,9 +348,14 @@ def main():
     try:
         owned = owned_buckets(client)
     except ProbeError as exc:
-        if exc.prerequisite and (module.check_mode or state == "absent"):
-            unprobed_exit(module, names, state, exc.msg)
-        module.fail_json(msg=exc.msg)
+        if not exc.refused:
+            module.fail_json(msg=exc.msg)
+        owner = key_holder(module, RGW(module), "ListBuckets")
+        exit_if_suspended_preview(module, owner, "ListBuckets", buckets=[])
+        if owner is None and (module.check_mode or state == "absent"):
+            unprobed_exit(module, names, state, exc.refused)
+        module.fail_json(msg=refused_msg("ListBuckets at %s" % p["endpoint_url"],
+                                         exc.refused, owner))
 
     for name in names:
         try:

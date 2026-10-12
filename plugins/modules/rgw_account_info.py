@@ -11,7 +11,7 @@ DOCUMENTATION = r"""
 ---
 module: rgw_account_info
 short_description: Read-only inventory of Ceph RGW accounts
-version_added: "0.2.0"
+version_added: "0.3.0"
 description:
   - Reports RGW accounts, their quotas and optionally their users, roles, buckets and
     usage statistics, using only read-only C(radosgw-admin) subcommands.
@@ -88,13 +88,13 @@ accounts:
   elements: dict
   sample:
     - id: RGW00000000000000001
-      name: acme
-      slug: acme
-      root_user: acmeroot
+      name: aviato
+      slug: aviato
+      root_user: aviatoroot
       quota: {enabled: true, max_size: 5497558138880, max_objects: 1000000}
-      users: [acmeroot]
-      roles: [acme-reader, acme-writer]
-      buckets: [acme-data, acme-logs]
+      users: [aviatoroot]
+      roles: [aviato-reader, aviato-writer]
+      buckets: [aviato-data, aviato-logs]
       stats: {size: 3221225472, num_objects: 1841}
 exec_mode_used:
   description: Which execution path actually ran.

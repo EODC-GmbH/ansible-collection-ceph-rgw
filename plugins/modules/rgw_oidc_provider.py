@@ -11,7 +11,7 @@ DOCUMENTATION = r"""
 ---
 module: rgw_oidc_provider
 short_description: Register an OIDC realm as an RGW OIDC provider in one account
-version_added: "0.2.0"
+version_added: "0.3.0"
 description:
   - Creates, replaces or removes the OIDC provider of a single RGW account, so that
     account's IAM roles can federate web-identity logins from that realm.
@@ -70,6 +70,32 @@ options:
         the module. Needed when RGW serves a certificate from a private CA.
       - Takes precedence over O(validate_certs) when set.
     type: path
+  exec_mode:
+    description:
+      - How to reach C(radosgw-admin).
+        The module calls it only after the IAM API refuses the keys,
+        to see whether any user holds the access key.
+    type: str
+    choices: [auto, native, container, cephadm]
+    default: auto
+  fsid:
+    description: Cluster fsid.
+      Read from C(/etc/ceph/ceph.conf) when not given.
+    type: str
+  image:
+    description: Ceph container image.
+    type: str
+  container_runtime:
+    description: Container runtime to use.
+    type: str
+    choices: [docker, podman]
+  cluster:
+    description: Ceph cluster name.
+    type: str
+    default: ceph
+  keyring:
+    description: Path to a ceph keyring.
+    type: str
 requirements:
   - boto3
 notes:
@@ -82,11 +108,15 @@ notes:
   - RGW has no C(UpdateOpenIDConnectProviderThumbprint), so drift in O(thumbprints) or
     O(client_ids) is applied as delete plus recreate. If the recreate fails, the previous
     client ids and thumbprints are put back and the task fails reporting both errors.
-  - RGW caches provider thumbprints in memory, so a create or replace does not take
-    effect until the RGW daemons restart. Notify a restart handler on C(changed).
-  - On O(state=absent) an authentication failure is treated as success. A provider
-    cannot outlive its account, so the account is already gone. This also masks
-    merely-wrong credentials during teardown.
+  - RGW reads the provider on each C(AssumeRoleWithWebIdentity),
+    so a create or replace applies to the next request without a restart.
+  - RGW answers C(AccessDenied) both for an unknown key and for a user without permission.
+    After a refusal the module runs C(radosgw-admin user info --access-key)
+    to see whether any user holds the key,
+    which needs the cluster admin keyring (use C(become)).
+    If none does, check mode reports V(would create)
+    and O(state=absent) reports the provider as gone with its account.
+    Otherwise the task fails.
 author:
   - Underknowledge (@Underknowledge)
 """
@@ -104,14 +134,13 @@ EXAMPLES = r"""
   loop: "{{ _rgw_tenants_present }}"
   loop_control:
     label: "{{ item.name }} ({{ item.account_id }})"
-  notify: Restart RGW for OIDC
 
 - name: Drop the provider of a decommissioned tenant
   underknowledge.ceph_rgw.rgw_oidc_provider:
     url: "{{ rgw_tenants_oidc.provider_url }}"
     endpoint_url: "{{ rgw_tenants_endpoint }}"
-    access_key: "{{ vault_rgw_tenants_acme_access_key }}"
-    secret_key: "{{ vault_rgw_tenants_acme_secret_key }}"
+    access_key: "{{ vault_rgw_tenants_aviato_access_key }}"
+    secret_key: "{{ vault_rgw_tenants_aviato_secret_key }}"
     state: absent
 """
 
@@ -138,8 +167,8 @@ rolled_back:
   sample: true
 probed:
   description:
-    - Whether the IAM endpoint was actually queried. False when the credentials were
-      rejected in check mode or with O(state=absent).
+    - Whether the IAM endpoint was queried.
+      False when no user holds the access key, in check mode or with O(state=absent).
   returned: always
   type: bool
   sample: true
@@ -149,7 +178,12 @@ import re
 
 from ansible.module_utils.basic import AnsibleModule, missing_required_lib
 
-from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw import diff_of
+from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw import (
+    RGW, RGW_COMMON_ARGS, diff_of,
+)
+from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw_refusal import (
+    REFUSED_CODES, error_code, exit_if_suspended_preview, key_holder, refused_msg,
+)
 
 try:
     import boto3
@@ -159,20 +193,7 @@ except ImportError:
 else:
     HAS_BOTO3 = True
 
-# In delete mode these mean the account, and the provider with it, is already gone.
-ACCOUNT_GONE_CODES = ("InvalidAccessKeyId", "SignatureDoesNotMatch",
-                      "AccessDenied", "AccessDeniedException")
-
 SHA1_HEX = re.compile(r"^[0-9a-f]{40}$")
-
-
-def error_code(exc):
-    """The IAM error code of a ClientError, falling back to the HTTP status."""
-    response = getattr(exc, "response", None) or {}
-    code = (response.get("Error") or {}).get("Code") or ""
-    if not code:
-        code = str((response.get("ResponseMetadata") or {}).get("HTTPStatusCode") or "")
-    return code
 
 
 def invalid_thumbprints(thumbprints):
@@ -182,7 +203,8 @@ def invalid_thumbprints(thumbprints):
     bad = [t for t in thumbprints if not SHA1_HEX.match(t)]
     if bad:
         return ("thumbprints malformed (need 40-hex SHA1): %s. Compute them from "
-                "<issuer>/protocol/openid-connect/certs; see the rgw_tenants README"
+                "<issuer>/protocol/openid-connect/certs; see 'Compute the OIDC thumbprint' "
+                "in the collection README"
                 % bad)
     return None
 
@@ -216,8 +238,13 @@ def snapshot(present, client_ids, thumbprints):
     }
 
 
-def handle_absent(module, client, url):
-    """Delete the provider matched by url. An auth failure means the account is gone."""
+def holder_of(module):
+    """The `user info` of the access key's holder, or None. Called after IAM refused it."""
+    return key_holder(module, RGW(module), "the IAM request")
+
+
+def handle_absent(module, client, url, holder=holder_of):
+    """Delete the provider matched by url. A key no user holds means the account is gone."""
     try:
         arn = find_arn(client, url)
         if arn is None:
@@ -229,14 +256,20 @@ def handle_absent(module, client, url):
         client.delete_open_id_connect_provider(OpenIDConnectProviderArn=arn)
     except ClientError as exc:
         code = error_code(exc)
-        if code in ACCOUNT_GONE_CODES:
-            module.exit_json(
-                changed=False, probed=False, arn=None, result="absent",
-                diff=diff_of({"present": False}, {"present": False}),
-                msg="the account for %s is already gone (%s), and its provider with it"
-                    % (url, code))
-        module.fail_json(msg="removing the OIDC provider for %s failed (%s): %s"
-                             % (url, code, exc))
+        if code not in REFUSED_CODES:
+            module.fail_json(msg="removing the OIDC provider for %s failed (%s): %s"
+                                 % (url, code, exc))
+        owner = holder(module)
+        exit_if_suspended_preview(module, owner, "removing the OIDC provider for %s" % url,
+                                  arn=None, result="not probed")
+        if owner is not None:
+            module.fail_json(msg=refused_msg("removing the OIDC provider for %s" % url,
+                                             code, owner))
+        module.exit_json(
+            changed=False, probed=False, arn=None, result="absent",
+            diff=diff_of({"present": False}, {"present": False}),
+            msg="IAM answered %s and no RGW user holds this access key, so the account "
+                "for %s is already gone, and its provider with it" % (code, url))
     except BotoCoreError as exc:
         module.fail_json(msg="removing the OIDC provider for %s failed: %s" % (url, exc))
     module.exit_json(changed=True, probed=True, arn=arn, result="deleted",
@@ -280,21 +313,26 @@ def replace(module, client, url, arn, before, want, previous):
                      diff=diff_of(before, want))
 
 
-def handle_present(module, client, url, want):
+def handle_present(module, client, url, want, holder=holder_of):
     """Create the provider, replace it on drift, or leave it alone."""
     try:
         arn = find_arn(client, url)
     except ClientError as exc:
         code = error_code(exc)
-        if module.check_mode and code in ACCOUNT_GONE_CODES:
+        if code not in REFUSED_CODES:
+            module.fail_json(msg="listing OIDC providers at %s failed (%s): %s"
+                                 % (url, code, exc))
+        owner = holder(module)
+        exit_if_suspended_preview(module, owner, "listing OIDC providers for %s" % url,
+                                  arn=None, result="not probed")
+        if owner is None and module.check_mode:
             # Greenfield tenant: the account-root user does not exist yet.
             module.exit_json(
                 changed=True, probed=False, arn=None, result="would create",
                 diff=diff_of({"present": "unknown"}, want),
                 msg="would create; prerequisite account-root user for this access key "
                     "absent, not probed")
-        module.fail_json(msg="listing OIDC providers at %s failed (%s): %s"
-                             % (url, code, exc))
+        module.fail_json(msg=refused_msg("listing OIDC providers for %s" % url, code, owner))
     except BotoCoreError as exc:
         module.fail_json(msg="listing OIDC providers for %s failed: %s" % (url, exc))
 
@@ -343,6 +381,7 @@ def main():
         validate_certs=dict(type="bool", default=True),
         ca_bundle=dict(type="path"),
     )
+    argument_spec.update(RGW_COMMON_ARGS)
 
     module = AnsibleModule(argument_spec=argument_spec, supports_check_mode=True)
 

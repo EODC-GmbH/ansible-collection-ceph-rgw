@@ -1,0 +1,22 @@
+---
+# Remove one tenant's OIDC provider over IAM, as drift for scenarios.sh:
+#   -e scenario_dropin=<drop-in file> -e scenario_tenant=<name>
+# Squid has no working `radosgw-admin oidc-provider`, so this uses the module the role uses.
+- name: Drop a tenant's OIDC provider
+  hosts: "{{ rgw_converge_hosts | default('mons') }}"
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Load the tenant drop-in
+      ansible.builtin.include_vars:
+        file: "{{ scenario_dropin }}"
+
+    - name: Remove the provider
+      underknowledge.ceph_rgw.rgw_oidc_provider:
+        url: "{{ rgw_tenants_oidc.provider_url }}"
+        endpoint_url: "{{ rgw_tenants_endpoint }}"
+        validate_certs: "{{ rgw_tenants_validate_certs | default(true) }}"
+        access_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (scenario_tenant | replace('-', '_')) ~ '_access_key') }}"
+        secret_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (scenario_tenant | replace('-', '_')) ~ '_secret_key') }}"
+        state: absent
+      when: inventory_hostname == ansible_play_hosts[0]

@@ -1,0 +1,32 @@
+---
+# A small site for the in-memory converge: two tenants, one service user, no STS roles.
+# rgw_tenants_endpoint is passed by inmemory.sh. Keys are fake and only valid here.
+rgw_sts_key: "inmemory-sts-key-0123"
+rgw_sts_roles: []
+
+rgw_tenants_oidc:
+  provider_url: "https://idp.example.com/realms/raviga"
+  client_ids: ["ceph-s3"]
+  thumbprints: ["0123456789abcdef0123456789abcdef01234567"]
+
+rgw_tenants_list:
+  - name: aviato
+    account_id: "RGW00000000000000001"
+    buckets: ["aviato-data", "aviato-logs"]
+    quota:
+      enabled: true
+      max_size: 1073741824
+      max_objects: -1
+    users:
+      - name: etl
+        capabilities: ["objects-read"]
+  - name: hooli
+    account_id: "RGW00000000000000002"
+    buckets: ["hooli-data"]
+
+vault_rgw_tenants_aviato_access_key: "AKINMEMORYAVIATO0001"
+vault_rgw_tenants_aviato_secret_key: "SKinmemoryaviato000000000000000000000001"
+vault_rgw_tenants_aviato_svc_etl_access_key: "AKINMEMORYAVIATOETL1"
+vault_rgw_tenants_aviato_svc_etl_secret_key: "SKinmemoryaviatoetl00000000000000000001"
+vault_rgw_tenants_hooli_access_key: "AKINMEMORYHOOLI00001"
+vault_rgw_tenants_hooli_secret_key: "SKinmemoryhooli0000000000000000000000001"

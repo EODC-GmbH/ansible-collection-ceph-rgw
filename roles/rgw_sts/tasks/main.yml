@@ -30,6 +30,8 @@
     value: "true"
     fsid: "{{ rgw_sts_fsid | default(omit, true) }}"
   notify: Restart RGW
+  # rgw_tenants reads this under --check, where the value is not set yet.
+  register: rgw_sts_auth_reg
   become: true
   when: inventory_hostname == rgw_sts_bootstrap_host
 

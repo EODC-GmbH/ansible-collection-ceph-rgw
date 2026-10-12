@@ -1,0 +1,79 @@
+{#- A tenant drop-in:
+    fixed key order, 2-space indent, `- ` list items.
+    Inputs: _dropin_var (rgw_tenant_<name>), _dropin_entry (its dict)
+    and _dropin_vault (the !vault blocks as text, copied through verbatim).
+    Shared by rgw_new_tenant and tasks/add_user.yml so a merge rewrites the same layout. -#}
+{%- set _order = ['name', 'account_id', 'root_user', 'quota', 'buckets', 'root_users', 'users'] -%}
+{#- Lifecycle switches (state, rotate_keys, purge_objects) are left out:
+    they are set for a single run. -#}
+{%- set _optional = ['quota', 'buckets', 'bucket_prefix', 'root_users', 'users', 'roles', 'limits',
+                     'session_duration'] -%}
+{%- set _yaml_words = ['true', 'false', 'yes', 'no', 'on', 'off', 'null', 'y', 'n'] -%}
+
+{#- Plain where YAML reads it back as the same string, JSON-quoted otherwise. -#}
+{%- macro scalar(value) -%}
+{%- if value is string and value is match('[a-z][a-z0-9_.-]*\Z') and value not in _yaml_words -%}
+{{ value }}
+{%- elif value is string -%}
+{{ value | to_json(ensure_ascii=False) }}
+{%- elif value is boolean -%}
+{{ value | lower }}
+{%- elif value is none -%}
+null
+{%- else -%}
+{{ value | to_json }}
+{%- endif -%}
+{%- endmacro -%}
+
+{#- A nested mapping keeps its own order, with `name` first.
+    `lead` is the first line's indentation, which carries the `- ` when the mapping is a list item. -#}
+{%- macro mapping(data, indent, lead, keys=none) -%}
+{%- set _keys = keys if keys is not none else (['name'] | select('in', data) | list)
+                + (data | reject('equalto', 'name') | list) -%}
+{%- for key in _keys -%}
+{{- entry(key, data[key], lead if loop.first else ' ' * indent, indent) -}}
+{%- endfor -%}
+{%- endmacro -%}
+
+{%- macro sequence(items, indent) -%}
+{%- for item in items -%}
+{%- if item is mapping and item -%}
+{{- mapping(item, indent + 2, ' ' * indent ~ '- ') -}}
+{%- elif item is iterable and item is not string -%}
+{{- ' ' * indent ~ '- ' ~ (item | to_json(ensure_ascii=False)) ~ '\n' -}}
+{%- else -%}
+{{- ' ' * indent ~ '- ' ~ scalar(item) ~ '\n' -}}
+{%- endif -%}
+{%- endfor -%}
+{%- endmacro -%}
+
+{%- macro entry(key, value, pad, indent) -%}
+{%- if value is mapping and value -%}
+{{- pad ~ key ~ ':\n' ~ mapping(value, indent + 2, ' ' * (indent + 2)) -}}
+{%- elif value is iterable and value is not string and value is not mapping and value | length > 0 -%}
+{{- pad ~ key ~ ':\n' ~ sequence(value, indent + 2) -}}
+{%- elif value is mapping -%}
+{{- pad ~ key ~ ': {}\n' -}}
+{%- elif value is iterable and value is not string -%}
+{{- pad ~ key ~ ': []\n' -}}
+{%- else -%}
+{{- pad ~ key ~ ': ' ~ scalar(value) ~ '\n' -}}
+{%- endif -%}
+{%- endmacro -%}
+
+{%- set _top_keys = (_order | select('in', _dropin_entry) | list)
+                    + (_dropin_entry | reject('in', _order) | sort) -%}
+{%- set _unset = _optional | reject('in', _dropin_entry) | list -%}
+---
+# Tenant drop-in for the rgw_tenants role, written by the ceph_rgw generator playbooks.
+# Drop into the directory rgw_tenants_dir points at. Deleting it stops managing the
+# tenant but leaves the account; decommission with state: absent first.
+# Config + account-root keys live together; keys are inline !vault (safe to commit)
+{% if _unset %}
+# {{ ('Optional keys not set here: ' ~ _unset | join(', ') ~ '.') | wordwrap(88, wrapstring='\n# ') }}
+{% endif %}
+# Schema: the rgw_tenants role README and its meta/argument_specs.yml.
+
+{{ _dropin_var }}:
+{{ mapping(_dropin_entry, 2, '  ', _top_keys) }}
+{{ _dropin_vault }}

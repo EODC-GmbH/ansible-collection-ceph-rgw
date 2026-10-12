@@ -6,8 +6,9 @@ Walks the full path an end user takes:
     -> sts.AssumeRoleWithWebIdentity(<tenant>-<role>)
       -> temporary creds -> an S3 op the role allows, plus one it does not.
 
-The login user must hold the grant "<TENANT>:<ROLE>" in the claim rgw_iam builds its trust
-conditions from (rgw_iam_grant_claim, default ceph_grants). One role is checked per run.
+The login user must hold the grant "/services/s3/<TENANT>/<ROLE>" (membership of that group)
+in the claim rgw_iam builds its trust conditions from (rgw_iam_grant_claim, default s3iam).
+One role is checked per run.
 Config via env:
 
   EP           RGW S3/STS/IAM endpoint (e.g. https://s3.example.com)
@@ -81,6 +82,13 @@ def s3_for(creds):
     )
 
 
+def denied(exc):
+    """True for AccessDenied or a 403; NoSuchBucket or a 5xx is not a denial."""
+    error = exc.response.get("Error", {})
+    status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return error.get("Code") == "AccessDenied" or status == 403
+
+
 def main():
     print(f"verify tenant={TENANT} role={ROLE} expect={EXPECT} account={ACCOUNT_ID} endpoint={EP}")
     creds = assume(get_token())
@@ -99,7 +107,10 @@ def main():
     else:  # a read-only role must be denied a write
         try:
             s3.put_object(Bucket=BUCKET, Key="denied.txt", Body=b"x")
-        except ClientError:
+        except ClientError as exc:
+            if not denied(exc):
+                print(f"FAIL  write failed for another reason: {exc}", file=sys.stderr)
+                return 1
             print("PASS  write correctly denied")
         else:
             print("FAIL  write was allowed on a read-only role", file=sys.stderr)
@@ -108,7 +119,11 @@ def main():
         # The account boundary must hold whatever the role's capabilities say.
         try:
             s3.list_objects_v2(Bucket=CROSS_BUCKET)
-        except ClientError:
+        except ClientError as exc:
+            if not denied(exc):
+                print(f"FAIL  cross-tenant {CROSS_BUCKET} failed for another reason: {exc}",
+                      file=sys.stderr)
+                return 1
             print(f"PASS  cross-tenant {CROSS_BUCKET} correctly denied")
         else:
             print(f"FAIL  cross-tenant {CROSS_BUCKET} was reachable", file=sys.stderr)
