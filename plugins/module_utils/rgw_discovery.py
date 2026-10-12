@@ -44,6 +44,24 @@ def inline_policies(entry):
             for p in entry.get("PermissionPolicies") or [] if p.get("PolicyName")}
 
 
+def policy_removals(name, account_id, entry):
+    """(description, radosgw-admin args) that clear every policy off a role.
+
+    DeleteRole refuses while any inline or managed policy remains. `entry` is the role's
+    `role list` entry; the caller runs each command with its own runner.
+    """
+    out = []
+    for policy in sorted(inline_policies(entry)):
+        out.append(("delete policy %s on %s" % (policy, name),
+                    ("role-policy", "delete", "--role-name=" + name,
+                     "--account-id=" + account_id, "--policy-name=" + policy)))
+    for arn in entry.get("ManagedPermissionPolicies") or []:
+        out.append(("detach %s from %s" % (arn, name),
+                    ("role", "policy", "detach", "--role-name=" + name,
+                     "--account-id=" + account_id, "--policy-arn=" + arn)))
+    return out
+
+
 def derive_slug(roles, buckets):
     """Tenant slug = the common `<slug>-` prefix of the account's roles and buckets.
 

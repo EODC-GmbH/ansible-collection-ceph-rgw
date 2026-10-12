@@ -28,10 +28,10 @@ sys.path.insert(0, os.path.join(_COLLECTION, "plugins", "modules"))
 def _bind_fqcn():
     """Make `ansible_collections.underknowledge.ceph_rgw` resolve to this checkout.
 
-    The plugins import module_utils by the collection's FQCN. Deriving the
-    ansible_collections root from the path only works when the checkout sits under
-    .../ansible_collections/underknowledge/ceph_rgw; binding the package chain to
-    _COLLECTION works in a standalone clone too.
+    The plugins import module_utils by the collection's FQCN. Deriving the ansible_collections
+    root from the path only works when the checkout sits under
+    .../ansible_collections/underknowledge/ceph_rgw; binding the package chain to _COLLECTION
+    works in a standalone clone too.
     """
     import importlib
 

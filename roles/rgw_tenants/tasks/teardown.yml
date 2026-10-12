@@ -2,9 +2,68 @@
 # Steps that need the account-root keys run before that user is removed. Keep the entry
 # (state: absent) until a run reports all OK, then delete it and its vault keys.
 
+# With stale vault keys S3 answers as for a deleted user, so the bucket and OIDC steps
+# would report "already gone". Check mode: a real run would recreate a removed root user.
+- name: Compare each decommissioned tenant's vaulted keys with the cluster
+  underknowledge.ceph_rgw.rgw_account_user:
+    uid: "{{ item.root_user | default(item.name ~ 'root') }}"
+    account_id: "{{ item.account_id }}"
+    access_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_access_key') }}"
+    secret_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_secret_key') }}"
+    check_identity: false
+    fsid: "{{ rgw_tenants_fsid | default(omit, true) }}"
+  loop: "{{ _rgw_tenants_absent }}"
+  loop_control:
+    label: "{{ item.root_user | default(item.name ~ 'root') }}"
+  register: _rgw_teardown_keys
+  check_mode: true
+  changed_when: false
+  become: true
+  when: inventory_hostname == rgw_tenants_bootstrap_host
+
+- name: Stop when a decommissioned tenant's vaulted keys do not match the cluster
+  ansible.builtin.assert:
+    quiet: true
+    that: item.keys_match is not sameas false
+    fail_msg: >-
+      {% if item.user.access_key_ids | default(['?']) | length == 0 %}
+      {{ item.item.root_user | default(item.item.name ~ 'root') }}
+      holds no key on the cluster, so the vaulted pair cannot match;
+      a key removed by hand is not put back on its own, in case it was revoked on purpose.
+      {% else %}vault keys for {{ item.item.name }}
+      do not match the cluster's keys for {{ item.item.root_user | default(item.item.name ~ 'root') }},
+      so teardown cannot see its buckets or OIDC provider.{% endif %}
+      Restore the previous
+      vault_rgw_tenants_{{ item.item.name | replace('-', '_') }}_access_key/_secret_key,
+      or run once with the tenant present and rotate_keys: true before tearing it down.
+  loop: "{{ _rgw_teardown_keys.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: inventory_hostname == rgw_tenants_bootstrap_host
+
+# Read before the root user is removed below.
+- name: Look up who holds each decommissioned tenant's account-root key
+  underknowledge.ceph_rgw.rgw_key_holder_info:
+    access_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_access_key') }}"
+    fsid: "{{ rgw_tenants_fsid | default(omit, true) }}"
+  loop: "{{ _rgw_tenants_absent }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _rgw_teardown_holders_reg
+  become: true
+  when: inventory_hostname == rgw_tenants_bootstrap_host
+
+- name: Index the decommissioned tenants' key holders by tenant
+  ansible.builtin.set_fact:
+    _rgw_teardown_holders: "{{ dict(_probed | map(attribute='item.name') | zip(_probed | map(attribute='key_holder'))) }}"
+  vars:
+    _probed: "{{ _rgw_teardown_holders_reg.results | default([]) | selectattr('key_holder', 'defined') | list }}"
+  when: inventory_hostname == rgw_tenants_bootstrap_host
+
 # A non-empty bucket fails the run unless both purge_objects and rgw_tenants_allow_purge
-# are set. Only current object versions are purged, so a versioned bucket still fails
-# with BucketNotEmpty.
+# are set. Only current object versions are purged, so a versioned bucket still fails with
+# BucketNotEmpty. Once the root user is gone, no user holds the refused keys, so on a
+# rerun this and the OIDC step report "absent".
 - name: Remove buckets for decommissioned tenants
   underknowledge.ceph_rgw.rgw_bucket:
     names: "{{ item.buckets }}"
@@ -16,9 +75,12 @@
     region: "{{ rgw_tenants_s3_region }}"
     access_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_access_key') }}"
     secret_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_secret_key') }}"
+    key_holder: "{{ _rgw_teardown_holders[item.name] }}"
   loop: "{{ _rgw_tenants_absent }}"
   loop_control:
     label: "{{ item.name }}: {{ item.buckets | default([]) | join(', ') }}"
+  delegate_to: "{{ rgw_tenants_api_host }}"
+  become: false
   when:
     - item.buckets | default([]) | length > 0
     - inventory_hostname == rgw_tenants_bootstrap_host
@@ -33,9 +95,12 @@
     region: "{{ rgw_tenants_s3_region }}"
     access_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_access_key') }}"
     secret_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_secret_key') }}"
+    key_holder: "{{ _rgw_teardown_holders[item.name] }}"
   loop: "{{ _rgw_tenants_absent }}"
   loop_control:
     label: "{{ item.name }} ({{ item.account_id }})"
+  delegate_to: "{{ rgw_tenants_api_host }}"
+  become: false
   when: inventory_hostname == rgw_tenants_bootstrap_host
 
 # Read from the cluster rather than config, to catch the <name>-x-* roles a tenant minted

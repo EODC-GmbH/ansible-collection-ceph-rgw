@@ -1,17 +1,51 @@
 ---
 # Add one static-key service user to an existing tenant drop-in: generate keys for
-# iam-<tenant>-svc-<slug>, vault-encrypt them, and merge a `users:` entry plus its two
-# !vault blocks into the file. rgw_iam puts its policy. Touches no cluster.
+# iam-<tenant>-svc-<slug>, vault-encrypt them and merge a `users:` entry plus its two !vault
+# blocks into the file. rgw_iam puts its policy. Touches no cluster. The work is in
+# tasks/add_user.yml.
 #
+#   ansible-playbook playbooks/rgw_add_service_user.yml              # prompts
 #   ANSIBLE_VAULT_PASSWORD_FILE=~/.vault-pass \
 #   ansible-playbook playbooks/rgw_add_service_user.yml \
-#     -e rgw_add_root_user_tenant=initrode-data-prod -e rgw_add_root_user=backup \
+#     -e rgw_add_service_user_tenant=raviga-data-prod -e rgw_add_service_user=etl \
 #     -e '{"rgw_add_service_user_capabilities": ["objects-read"]}'
 #
-# Inputs: the rgw_add_root_user_* variables, plus
-#   rgw_add_service_user_capabilities   rgw_iam capability names (default none). Scope to
-#                                       buckets/prefixes by editing the entry afterwards.
+# Inputs (the first two are prompted when not passed; both required):
+#   rgw_add_service_user_tenant        existing tenant account name as written in the drop-in;
+#                                      a non-canonical spelling is refused
+#   rgw_add_service_user               service label, sanitized to the descriptor slug by
+#                                      ceph_descriptor
+#   rgw_add_service_user_capabilities  rgw_iam capability names (default none); scope them to
+#                                      buckets/prefixes by editing the entry afterwards
+#   rgw_add_service_user_output_dir    default <playbook dir>/rgw_tenants.d
+#   rgw_add_service_user_vault_password_file  default: Ansible's vault config, else
+#                                             $KAYOBE_VAULT_PASSWORD (tasks/vault_id.yml)
 - name: Add a service user to a tenant drop-in
-  ansible.builtin.import_playbook: rgw_add_root_user.yml
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  # A name with spaces needs no quoting at the prompt, but needs the JSON form with -e.
+  # default "": without a terminal an unasked prompt otherwise yields the string 'None'.
+  vars_prompt:
+    - name: rgw_add_service_user_tenant
+      prompt: "Existing RGW tenant account (e.g. raviga-data-prod)"
+      private: false
+      default: ""
+    - name: rgw_add_service_user
+      prompt: "New service user label (e.g. etl, or backup)"
+      private: false
+      default: ""
   vars:
-    _ar_import_kind: svc
+    # Aliased because a play var under the input's own name would shadow an inventory override.
+    _au_kind: svc
+    _au_tenant_var: rgw_add_service_user_tenant
+    _au_tenant_in: "{{ rgw_add_service_user_tenant | default('', true) }}"
+    _au_user_var: rgw_add_service_user
+    _au_user_in: "{{ rgw_add_service_user | default('', true) }}"
+    _au_output_dir: "{{ rgw_add_service_user_output_dir | default(playbook_dir ~ '/rgw_tenants.d', true) }}"
+    _au_vault_var: rgw_add_service_user_vault_password_file
+    _au_vault_file: "{{ rgw_add_service_user_vault_password_file | default('', true) }}"
+    _au_capabilities: "{{ rgw_add_service_user_capabilities | default([], true) }}"
+  tasks:
+    - name: Add the service user
+      ansible.builtin.import_tasks: tasks/add_user.yml

@@ -11,13 +11,12 @@ DOCUMENTATION = r"""
 ---
 module: rgw_account
 short_description: Manage a Ceph RGW account and its storage quota
-version_added: "0.2.0"
+version_added: "0.3.0"
 description:
-  - Creates or removes an RGW account - the hard tenant isolation boundary - and
-    reconciles its account-scoped storage quota.
-  - Account entity limits (C(max_users), C(max_roles) and friends) are deliberately not
-    managed here. C(rgw_iam_sync) is the single writer of C(account modify); two writers
-    would each report the other's write as drift on alternate runs.
+  - Creates or removes an RGW account, the tenant isolation boundary, and reconciles its
+    account-scoped storage quota.
+  - Account entity limits (C(max_users), C(max_roles) and so on) are left to
+    C(rgw_iam_sync); two writers would each report the other's write as drift.
 options:
   account_id:
     description: The account id, C(RGW) followed by 17 digits.
@@ -26,9 +25,8 @@ options:
   name:
     description:
       - Account name, applied only when the account is created.
-      - Not reconciled. An existing account's name is cosmetic, and renaming every
-        account in an estate is not something a routine converge should do silently.
-        Set O(update_name) to reconcile it deliberately.
+      - The name is cosmetic and not reconciled on an existing account unless O(update_name) is
+        set.
     type: str
   update_name:
     description: Also reconcile O(name) on an account that already exists.
@@ -59,7 +57,7 @@ options:
   purge_data:
     description:
       - Pass C(--purge-data) when removing, deleting the account's remaining data.
-      - Without it, RGW refuses to remove a non-empty account, which is the safe default.
+      - Without it, RGW refuses to remove a non-empty account.
     type: bool
     default: false
   exec_mode:
@@ -92,7 +90,7 @@ EXAMPLES = r"""
 - name: Ensure the tenant account exists with a 5 TiB cap
   underknowledge.ceph_rgw.rgw_account:
     account_id: RGW00000000000000001
-    name: tenant-acme
+    name: tenant-aviato
     quota:
       enabled: true
       max_size: "{{ 5 * 1024 ** 4 }}"
@@ -111,8 +109,14 @@ account:
   returned: when state is present
   type: dict
   sample:
-    name: tenant-acme
+    name: tenant-aviato
     quota: {enabled: true, max_size: 5497558138880, max_objects: 1000000}
+actions:
+  description: What the run did, or would do in check mode. Any of C(created), C(removed), C(renamed), C(quota).
+  returned: always
+  type: list
+  elements: str
+  sample: [created]
 exec_mode_used:
   description: Which execution path actually ran.
   returned: always
@@ -124,12 +128,7 @@ from ansible.module_utils.basic import AnsibleModule
 from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw import (
     RGW, RGW_COMMON_ARGS, RGWError, diff_of,
 )
-
-
-def read_account(rgw, account_id):
-    rc, info, _, _ = rgw.run("account", "get", "--account-id", account_id,
-                             check_rc=False)
-    return info if rc == 0 else None
+from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw_read import read_account
 
 
 def snapshot(info):

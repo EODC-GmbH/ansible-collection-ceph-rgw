@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# The in-memory cluster's radosgw-admin; see ../fakecli.py.
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+exec "${FAKE_CEPH_PYTHON:-python3}" "$here/fakecli.py" radosgw-admin "$@"

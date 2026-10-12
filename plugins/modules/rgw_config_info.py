@@ -11,7 +11,7 @@ DOCUMENTATION = r"""
 ---
 module: rgw_config_info
 short_description: Read Ceph runtime configuration options
-version_added: "0.2.0"
+version_added: "0.3.0"
 description:
   - Reads one or more C(ceph config get) values without writing anything, for preflight
     checks that must also run under C(--check).

@@ -15,15 +15,13 @@ version_added: "0.3.0"
 description:
   - Puts one named inline policy on a plain (non-root) user inside an RGW account, and
     reports or removes any other inline policy on it.
-  - This is what scopes a static-key service user. Without a policy an account user can
-    do nothing at all; with one it can do exactly what the policy allows, inside its own
-    account only.
+  - This scopes a static-key service user. Without a policy an account user can do
+    nothing; with one it can do what the policy allows, inside its own account.
 options:
   user_name:
     description:
-      - The IAM UserName, which RGW resolves against the user's B(display name), not its
-        uid. Create the user with uid and display name equal, as
-        M(underknowledge.ceph_rgw.rgw_account_user) does by default.
+      - The IAM UserName, which RGW resolves against the user's display name, not its uid.
+        M(underknowledge.ceph_rgw.rgw_account_user) sets both to the same string by default.
     type: str
     required: true
   policy_name:
@@ -35,7 +33,8 @@ options:
     type: dict
     required: true
   prune:
-    description: Remove inline policies other than O(policy_name). Without it they are only reported.
+    description: Remove inline policies other than O(policy_name). Without it they are only
+      reported.
     type: bool
     default: false
   endpoint_url:
@@ -63,34 +62,68 @@ options:
       - CA bundle to verify the endpoint's TLS certificate against, on the host running
         the module. Takes precedence over O(validate_certs) when set.
     type: path
+  key_holder:
+    description:
+      - The RV(underknowledge.ceph_rgw.rgw_key_holder_info#module:key_holder) result
+        for O(access_key), read on a Ceph host before this task.
+      - Consulted only after a refusal. Without it a refusal fails the task.
+    type: dict
+    suboptions:
+      found:
+        description: Whether any user holds the access key.
+        type: bool
+        required: true
+      user_id:
+        description: The holder's uid.
+        type: str
+      account_id:
+        description: The holder's account.
+        type: str
+      suspended:
+        description: Whether the holder is suspended.
+        type: bool
+        default: false
 requirements:
   - boto3
 notes:
+  - boto3 must be importable by the interpreter running the module.
+    It needs no Ceph tooling, so it can run on any host that reaches O(endpoint_url).
   - C(radosgw-admin) on squid can attach managed policies to a user but cannot put an
-    inline one, and the six managed policies are all C(Resource "*"). The IAM API over
-    boto3 is the only way to scope a user, which is why this module talks to
-    O(endpoint_url).
+    inline one, and the six managed policies are all C(Resource "*"), so this module uses
+    the IAM API at O(endpoint_url).
   - RGW discards a whole policy that names one action it does not know, leaving the user
-    with nothing. Compose O(policy) from the rgw_iam capability catalogue, not by hand.
+    with nothing. Compose O(policy) from the rgw_iam capability catalogue.
   - In check mode a user that does not exist yet is reported as a pending put, because
     rgw_tenants creates it and a dry run ahead of that finds nothing.
+  - RGW answers C(AccessDenied) both for an unknown key and for a user without permission.
+    After a refusal the module reads O(key_holder). If no user holds the key, check mode
+    reports a pending put, since the account-root user is not created yet. Otherwise the
+    task fails.
 author:
   - Underknowledge (@Underknowledge)
 """
 
 EXAMPLES = r"""
+- name: Look up who holds the tenant's account-root key, on a Ceph host
+  underknowledge.ceph_rgw.rgw_key_holder_info:
+    access_key: "{{ vault_rgw_tenants_aviato_access_key }}"
+  become: true
+  register: aviato_holder
+
 - name: Scope a service user to one bucket, read-only
   underknowledge.ceph_rgw.rgw_user_policy:
-    user_name: iam-acme-svc-backup
+    user_name: iam-aviato-svc-backup
     policy:
       Version: "2012-10-17"
       Statement:
         - Effect: Allow
           Action: ["s3:GetObject", "s3:ListBucket"]
-          Resource: ["arn:aws:s3:::acme-data", "arn:aws:s3:::acme-data/*"]
+          Resource: ["arn:aws:s3:::aviato-data", "arn:aws:s3:::aviato-data/*"]
     endpoint_url: "{{ rgw_tenants_endpoint }}"
-    access_key: "{{ vault_rgw_tenants_acme_access_key }}"
-    secret_key: "{{ vault_rgw_tenants_acme_secret_key }}"
+    access_key: "{{ vault_rgw_tenants_aviato_access_key }}"
+    secret_key: "{{ vault_rgw_tenants_aviato_secret_key }}"
+    key_holder: "{{ aviato_holder.key_holder }}"
+  delegate_to: localhost
 """
 
 RETURN = r"""
@@ -99,7 +132,7 @@ actions:
   returned: always
   type: list
   elements: str
-  sample: ["CHANGED iam-acme-svc-backup: policy 'tenant' put"]
+  sample: ["CHANGED iam-aviato-svc-backup: policy 'tenant' put"]
 """
 
 import json
@@ -107,9 +140,15 @@ from urllib.parse import unquote
 
 from ansible.module_utils.basic import AnsibleModule, missing_required_lib
 
-from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw import diff_of
+from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw import (
+    diff_of,
+)
 from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw_iam import (
     IAMError, loads, same,
+)
+from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw_refusal import (
+    KEY_HOLDER_ARGS, REFUSED_CODES, error_code, exit_if_suspended_preview, key_holder,
+    refused_msg,
 )
 
 try:
@@ -135,16 +174,19 @@ def policy_from_api(document):
 
 
 def reconcile_user_policy(client, user, policy_name, desired, prune=False, check_mode=False):
-    """Bring one user's inline policy to `desired`. Returns (changed, actions, before, after).
+    """Bring one user's inline policy to `desired`.
 
-    Any inline policy other than `policy_name` is extra authority: always reported,
-    removed only under prune.
+    Returns (changed, actions, before, after). Any inline policy other than `policy_name`
+    is extra authority: always reported, removed only under prune. A ClientError other than
+    NoSuchEntity is raised to the caller.
     """
     verb = "WOULD  " if check_mode else "CHANGED"
     try:
         names = client.list_user_policies(UserName=user).get("PolicyNames") or []
     except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") == "NoSuchEntity" and check_mode:
+        if error_code(exc) != "NoSuchEntity":
+            raise
+        if check_mode:
             # rgw_tenants creates the user, so a dry run ahead of it finds nothing.
             return True, [f"WOULD   {user}: policy '{policy_name}' put "
                           f"(user not created yet)"], None, desired
@@ -190,6 +232,7 @@ def main():
         validate_certs=dict(type="bool", default=True),
         ca_bundle=dict(type="path"),
     )
+    argument_spec.update(KEY_HOLDER_ARGS)
     module = AnsibleModule(argument_spec=argument_spec, supports_check_mode=True)
 
     if not HAS_BOTO3:
@@ -213,7 +256,23 @@ def main():
         changed, actions, before, after = reconcile_user_policy(
             client, p["user_name"], p["policy_name"], p["policy"],
             prune=p["prune"], check_mode=module.check_mode)
-    except (IAMError, BotoCoreError, ClientError) as exc:
+    except ClientError as exc:
+        code = error_code(exc)
+        if code not in REFUSED_CODES:
+            module.fail_json(msg="%s: %s" % (p["user_name"], exc))
+        owner = key_holder(module, "the IAM request", code)
+        exit_if_suspended_preview(module, owner, "the IAM request for %s" % p["user_name"],
+                                  actions=["SKIP    %s: key holder suspended, not probed"
+                                           % p["user_name"]])
+        if owner is None and module.check_mode:
+            # Greenfield tenant: the account-root user does not exist yet.
+            greenfield = dict(diff=diff_of(None, p["policy"])) if module._diff else {}
+            module.exit_json(changed=True, **greenfield, actions=[
+                f"WOULD   {p['user_name']}: policy '{p['policy_name']}' put "
+                f"(account-root user not created yet)"])
+        module.fail_json(msg=refused_msg("the IAM request for %s" % p["user_name"],
+                                         code, owner))
+    except (IAMError, BotoCoreError) as exc:
         module.fail_json(msg="%s: %s" % (p["user_name"], exc))
 
     result = dict(changed=changed, actions=actions)

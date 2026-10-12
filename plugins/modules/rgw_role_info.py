@@ -11,10 +11,10 @@ DOCUMENTATION = r"""
 ---
 module: rgw_role_info
 short_description: Read-only inventory of the IAM roles in a Ceph RGW account
-version_added: "0.2.0"
+version_added: "0.3.0"
 description:
-  - Reports the IAM roles of one RGW account - ARN, session duration, trust document,
-    inline policy names and documents, attached managed policy ARNs and tags - using only
+  - Reports the IAM roles of one RGW account (ARN, session duration, trust document,
+    inline policy names and documents, attached managed policy ARNs and tags) using only
     read-only C(radosgw-admin) subcommands.
   - C(role list --account-id) returns all of that in one call. C(role-policy list) is
     used only for a role whose listing entry carries no C(PermissionPolicies).
@@ -56,9 +56,8 @@ options:
 author:
   - Underknowledge (@Underknowledge)
 notes:
-  - A role that RV(roles[].tags) reports as tagged is unassumable. Role tags become the
-    session's principal tags, so every assume also needs C(sts:TagSession), and
-    C(UntagRole) is a silent no-op on this build. Delete and recreate the role.
+  - A role that RV(roles[].tags) reports as tagged cannot be assumed and cannot be untagged
+    on this build; see M(underknowledge.ceph_rgw.rgw_role).
 """
 
 EXAMPLES = r"""
@@ -70,22 +69,22 @@ EXAMPLES = r"""
 - name: Find every role belonging to one tenant, for teardown
   underknowledge.ceph_rgw.rgw_role_info:
     account_id: RGW00000000000000001
-    name_prefix: acme-
-  register: rgw_acme_roles
+    name_prefix: aviato-
+  register: rgw_aviato_roles
 
 - name: Remove them, policies first
   underknowledge.ceph_rgw.rgw_role:
     name: "{{ item.name }}"
     account_id: RGW00000000000000001
     state: absent
-  loop: "{{ rgw_acme_roles.roles }}"
+  loop: "{{ rgw_aviato_roles.roles }}"
   loop_control:
     label: "{{ item.name }}"
 
 - name: Read one role's trust document
   underknowledge.ceph_rgw.rgw_role_info:
     account_id: RGW00000000000000001
-    name: acme-reader
+    name: aviato-reader
   register: rgw_reader
 """
 
@@ -136,8 +135,8 @@ roles:
       type: list
       elements: dict
   sample:
-    - name: acme-reader
-      arn: "arn:aws:iam::RGW00000000000000001:role/acme-reader"
+    - name: aviato-reader
+      arn: "arn:aws:iam::RGW00000000000000001:role/aviato-reader"
       max_session_duration: 3600
       policy_names: [tenant]
       managed_policy_arns: []

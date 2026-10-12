@@ -11,7 +11,7 @@ DOCUMENTATION = r"""
 ---
 module: rgw_role
 short_description: Manage a Ceph RGW IAM role, its trust policy and its inline policies
-version_added: "0.2.0"
+version_added: "0.3.0"
 description:
   - Creates and reconciles one IAM role inside an RGW account (trust document, inline
     permission policies, session duration), and removes it in the order RGW requires.
@@ -20,9 +20,8 @@ options:
   name:
     description:
       - The role name.
-      - Validated against C(^[A-Za-z0-9=,.@-]+$) and 64 characters, the intersection of
-        RGW's two validators. The IAM REST layer allows C(_) and rejects C(:), the storage
-        layer the reverse, so a name outside it is untouchable from one of the two.
+      - Validated against C(^[A-Za-z0-9=,.@-]+$) and 64 characters. The IAM REST layer
+        allows C(_) and rejects C(:), the storage layer the reverse; this is the intersection.
     type: str
     required: true
   account_id:
@@ -37,8 +36,7 @@ options:
   policies:
     description:
       - Inline permission policies to put on the role.
-      - Omit the option entirely to leave the role's inline policies alone; O(purge_policies)
-        then does nothing either.
+      - Omit to leave the role's inline policies alone.
     type: list
     elements: dict
     suboptions:
@@ -58,8 +56,7 @@ options:
   purge_policies:
     description:
       - Remove inline policies that O(policies) does not list.
-      - Only applies when O(policies) is given, so a task that does not manage policies
-        never deletes one it cannot see.
+      - Only applies when O(policies) is given.
     type: bool
     default: true
   state:
@@ -92,10 +89,10 @@ options:
 author:
   - Underknowledge (@Underknowledge)
 notes:
-  - There is deliberately no C(tags) option. On this RGW build a tagged role is
-    permanently unassumable (role tags become session principal tags, so every assume
-    also needs C(sts:TagSession)), and C(UntagRole) is a silent no-op. A role found
-    tagged is reported as a warning; the only repair is delete and recreate.
+  - There is no C(tags) option. On this RGW build a tagged role cannot be assumed (role
+    tags become session principal tags, so every assume also needs C(sts:TagSession)), and
+    C(UntagRole) is a no-op. A tagged role is reported as a warning; the repair is delete
+    and recreate.
   - A trust change is applied in place with C(role-trust-policy modify). Recreating would
     mint a new RoleId and break every live session. Trust is evaluated at assume time
     only, so the change does not reach live sessions; permission policy changes do.
@@ -112,7 +109,7 @@ notes:
 EXAMPLES = r"""
 - name: Reconcile a web-identity role, trust and policy both
   underknowledge.ceph_rgw.rgw_role:
-    name: acme-reader
+    name: aviato-reader
     account_id: RGW00000000000000001
     max_session_duration: 3600
     assume_role_policy_document:
@@ -125,7 +122,7 @@ EXAMPLES = r"""
           Action: ["sts:AssumeRoleWithWebIdentity"]
           Condition:
             "ForAnyValue:StringEquals":
-              "idp.example/realms/r:ceph_grants": "acme:reader"
+              "idp.example/realms/r:s3iam": "/services/s3/aviato/reader"
     policies:
       - name: tenant
         document:
@@ -133,17 +130,17 @@ EXAMPLES = r"""
           Statement:
             - Effect: Allow
               Action: ["s3:GetObject", "s3:ListBucket"]
-              Resource: ["arn:aws:s3:::acme-*", "arn:aws:s3:::acme-*/*"]
+              Resource: ["arn:aws:s3:::aviato-*", "arn:aws:s3:::aviato-*/*"]
 
 - name: Leave the inline policies alone, update only the trust
   underknowledge.ceph_rgw.rgw_role:
-    name: acme-reader
+    name: aviato-reader
     account_id: RGW00000000000000001
-    assume_role_policy_document: "{{ acme_trust }}"
+    assume_role_policy_document: "{{ aviato_trust }}"
 
 - name: Remove a role, policies detached first
   underknowledge.ceph_rgw.rgw_role:
-    name: acme-reader
+    name: aviato-reader
     account_id: RGW00000000000000001
     state: absent
 """
@@ -154,7 +151,7 @@ role:
   returned: when state is present
   type: dict
   sample:
-    arn: "arn:aws:iam::RGW00000000000000001:role/acme-reader"
+    arn: "arn:aws:iam::RGW00000000000000001:role/aviato-reader"
     max_session_duration: 3600
     policies: {}
     managed_policy_arns: []
@@ -177,8 +174,9 @@ from ansible.module_utils.basic import AnsibleModule
 from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw import (
     RGW, RGW_COMMON_ARGS, RGWError, diff_of,
 )
+from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw_read import read_roles
 from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw_discovery import (
-    inline_policies, role_entries,
+    inline_policies, policy_removals, role_entries,
 )
 from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw_iam import (
     MAX_ROLE_NAME_LEN, ROLE_NAME_RE, SESSION_DURATION_MAX, SESSION_DURATION_MIN,
@@ -192,8 +190,8 @@ def read_role(rgw, name, account_id):
     The listing carries the trust document, inline policies with their values, managed
     policy ARNs, session duration and tags, so nothing is left to ask per role.
     """
-    rc, listing, _, _ = rgw.run("role", "list", "--account-id", account_id, check_rc=False)
-    if rc != 0:
+    listing = read_roles(rgw, account_id)
+    if listing is None:
         return None
     return dict(role_entries(listing)).get(name)
 
@@ -227,16 +225,6 @@ def desired(before, trust, policies, duration, purge):
     current.update({name: norm(doc) for name, doc in policies.items()})
     after["policies"] = current
     return after
-
-
-def detach_policies(rgw, name, account_id, entry):
-    """Clear every inline and managed policy off a role; DeleteRole refuses while any remain."""
-    for policy in sorted(inline_policies(entry)):
-        rgw.run("role-policy", "delete", "--role-name", name,
-                "--account-id", account_id, "--policy-name", policy, json_out=False)
-    for arn in entry.get("ManagedPermissionPolicies") or []:
-        rgw.run("role", "policy", "detach", "--role-name", name,
-                "--account-id", account_id, "--policy-arn", arn, json_out=False)
 
 
 def validate(module, name, duration):
@@ -304,7 +292,8 @@ def main():
                 changed = True
                 actions.append("removed")
                 if not module.check_mode:
-                    detach_policies(rgw, name, account_id, entry)
+                    for _what, args in policy_removals(name, account_id, entry):
+                        rgw.run(*args, json_out=False)
                     rgw.run("role", "delete", "--role-name", name,
                             "--account-id", account_id, json_out=False)
             module.exit_json(changed=changed, actions=actions,
@@ -349,7 +338,7 @@ def main():
                             "--account-id", account_id,
                             "--max-session-duration", duration, json_out=False)
 
-        live_policies = inline_policies(entry)
+        live_policies = inline_policies(entry or {})
         for policy in sorted(wanted):
             if not same(live_policies.get(policy) or {}, wanted[policy]):
                 changed = True
@@ -373,8 +362,8 @@ def main():
             if changed:
                 entry = read_role(rgw, name, account_id)
             after = snapshot(entry)
-            # RGW answers a policy naming an action it does not know by discarding the
-            # whole document and still exiting 0, so only a re-read shows it.
+            # A policy naming an unknown action is discarded with exit 0; only a re-read
+            # shows it.
             dropped = [policy for policy in sorted(wanted)
                        if not same(after.get("policies", {}).get(policy) or {}, wanted[policy])]
             if dropped:

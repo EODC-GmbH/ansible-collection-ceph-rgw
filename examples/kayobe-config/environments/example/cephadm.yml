@@ -1,72 +1,62 @@
 ---
-# Example configuration. Merge these keys into your kayobe environment's cephadm.yml.
-# Everything here is non-secret; the S3 keys live in the vault (see secrets.yml.example).
+# Merge into your kayobe environment's cephadm.yml. Secrets are in secrets.yml.example.
 
-# Reference the vaulted signing key; never inline it.
 rgw_sts_key: "{{ vault_rgw_sts_key }}"
 
-# Standalone AssumeRole / GetSessionToken roles: usually empty. The web-identity tenant
-# roles are rgw_iam's.
+# Standalone AssumeRole / GetSessionToken roles. The web-identity tenant roles are rgw_iam's.
 rgw_sts_roles: []
 
-# service_name, bootstrap_host and fsid are per role and default to rgw.rgw, the first
-# mon, and /etc/ceph/ceph.conf. Override both copies if your RGW service has another name
-# (ceph orch ls --service-type rgw):
+# service_name, bootstrap_host and fsid default to rgw.rgw, the first mon and
+# /etc/ceph/ceph.conf. Override the service name if `ceph orch ls --service-type rgw` shows
+# another:
 # rgw_sts_service_name: "rgw.default"
-# rgw_tenants_service_name: "rgw.default"
 
-# RGW S3/IAM/STS endpoint the bootstrap host can reach.
 rgw_tenants_endpoint: "http://ceph-rgw.internal.example:8080"
 
-# The OIDC realm minting web-identity tokens. thumbprints is the SHA1 hex of the JWKS
-# signing cert (the use=sig key's x5c), NOT the IdP TLS chain; recompute it whenever the
-# realm signing key rotates.
 rgw_tenants_oidc:
   provider_url: "https://idp.example.com/realms/myrealm"
   client_ids: ["ceph-s3"]
-  # Compute the real value (the role rejects this CHANGEME sentinel, since it is not 40-hex):
-  #   curl -s https://idp.example.com/realms/myrealm/protocol/openid-connect/certs \
-  #     | python3 -c 'import sys,json,base64,hashlib; \
-  #       k=[k for k in json.load(sys.stdin)["keys"] if k.get("use")=="sig"][0]; \
-  #       der=base64.b64decode(k["x5c"][0]); print(hashlib.sha1(der).hexdigest())'
+  # The role rejects this placeholder. See "Compute the OIDC thumbprint" in the README.
   thumbprints: ["CHANGEME-40-hex-sha1-of-the-jwks-signing-cert"]
 
 # The IAM role catalogue and capability bundles are rgw_iam's. Commonly overridden:
 # rgw_iam_session_duration: 3600        # seconds, RGW bounds it 3600..43200
 # rgw_iam_account_limits: {max_roles: 100}
 
-# Gates, all off by default. Turn one on for a single run, then back off:
+# Gates, off by default except root user removal. Turn one on for a single run:
 # rgw_tenants_rotate_keys: true
 # rgw_tenants_allow_teardown: true     # act on state: absent entries
 # rgw_tenants_allow_purge: true        # let purge_objects destroy data
+# rgw_iam_prune: true                  # remove stale platform roles and stray policies
+# rgw_tenants_allow_root_user_removal: false   # on by default; off keeps absent root_users
 
-# One entry per tenant. account_id is "RGW" + 17 digits, unique and stable. max_size is in
-# bytes or -1; a Jinja expression keeps it readable.
+# account_id is "RGW" + 17 digits, unique and stable. max_size is in bytes or -1.
 rgw_tenants_list:
-  - name: acme
+  - name: aviato
     account_id: "RGW00000000000000001"
-    buckets: ["acme-data", "acme-logs", "acme-backups"]
+    buckets: ["aviato-data", "aviato-logs", "aviato-backups"]
     quota:
       enabled: true
       max_size: "{{ 500 * 1024 ** 3 }}" # 500 GiB
       max_objects: -1                    # no object-count cap
     limits:
-      max_users: 20                      # cap account users (-1 = unlimited)
-      max_buckets: 50                    # cap account buckets (-1 = unlimited)
-    # rotate_keys: true                  # roll THIS tenant's key once (also needs the vault key changed)
-  - name: globex
+      max_users: 20                      # -1 = unlimited
+      max_buckets: 50
+    # rotate_keys: true                  # roll this tenant's key once, after changing the vault key
+    # access_keys:                       # more keys of the primary root user, each present or absent
+    #   - access_key: AKAVIATOOLDKEY000001
+    #     state: absent                    # removed on the next run
+  - name: hooli
     account_id: "RGW00000000000000002"
-    buckets: ["globex-data", "globex-logs"]
+    buckets: ["hooli-data", "hooli-logs"]
     # quota: omitted -> unlimited
-    # limits: omitted -> RGW account defaults
-    # root_user: globexadmin           # optional override
-    # bucket_prefix: "globex-"         # optional; defaults to "<name>-"
+    # limits: omitted -> rgw_iam_account_limits
+    # root_user: gavinbelson
+    # bucket_prefix: "hooli-"          # default "<name>-"
 
-  # Decommission: set state: absent and run once with rgw_tenants_allow_teardown=true.
-  # Keep the entry and its vault keys until the run reports all OK, then delete both. A
-  # non-empty bucket also needs purge_objects: true and rgw_tenants_allow_purge=true.
-  # - name: initech
+  # Decommission: see "Decommission a tenant" in the README.
+  # - name: nucleus
   #   account_id: "RGW00000000000000003"
   #   state: absent
-  #   buckets: ["initech-data"]        # listed so they get removed
+  #   buckets: ["nucleus-data"]        # listed so they get removed
   #   purge_objects: true              # only if the buckets still hold data (destructive)

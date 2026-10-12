@@ -12,6 +12,9 @@ rgw_tenants_fsid: ""
 # each rgw_tenant_<name> dict appended to rgw_tenants_list; a drop-in overrides an inline
 # entry of the same name. playbooks/rgw_new_tenant.yml writes one. Empty => not loaded.
 rgw_tenants_dir: ""
+# Tenant names a run reconciles; empty means all of them. The others are still loaded and
+# validated, and still count as managed for discover, report and verify.
+rgw_tenants_limit: []
 
 # Read-only discovery: list every RGW account, mark it managed or unmanaged against
 # rgw_tenants_list, write an adoption stub per unmanaged account, end the play.
@@ -24,30 +27,29 @@ rgw_tenants_report: false
 
 # Gates for the destructive paths, so a scheduled converge never takes them.
 #
-# Roll every tenant's account-root S3 keys to the current vaulted value. Rotates only on
-# drift, so it is idempotent while on.
+# Roll every tenant's S3 keys (account-root, additional root and service users) to the
+# current vaulted values. Rotates only on drift, so it is idempotent while on.
 rgw_tenants_rotate_keys: false
 # Run the state: absent decommission path at all. Off => absent entries are reported
-# and skipped, so a committed `state: absent` never deletes a tenant unattended.
+# and skipped.
 rgw_tenants_allow_teardown: false
 # Second gate: a tenant's purge_objects takes effect only when this is also true.
-# Without it a non-empty bucket or account fails the run instead of being destroyed.
+# Without it a non-empty bucket or account fails the run.
 rgw_tenants_allow_purge: false
 # Honor a root_users entry marked state: absent. On by default because buckets are owned
 # by the account, not the uid, so removing a root user destroys no data.
 rgw_tenants_allow_root_user_removal: true
 
-# cephadm RGW service restarted after an OIDC provider change (RGW caches the provider
-# in memory). Check `ceph orch ls --service-type rgw` if it is not literally rgw.rgw.
-rgw_tenants_service_name: "rgw.rgw"
-
-# RGW S3/IAM endpoint the bootstrap host can reach, e.g. http://<rgw-vip>:8080.
+# RGW S3/IAM endpoint rgw_tenants_api_host can reach, e.g. http://<rgw-vip>:8080.
 rgw_tenants_endpoint: ""
 
-# TLS verification for the boto3 calls (OIDC providers, buckets) against
-# rgw_tenants_endpoint. A public-CA certificate needs neither. For a private CA, point
-# rgw_tenants_ca_bundle at a PEM file on the bootstrap host instead of turning
-# verification off.
+# Host that makes the boto3 calls (OIDC providers, buckets) against rgw_tenants_endpoint.
+# Its Python needs boto3, and it needs no Ceph tooling.
+# Set it to the bootstrap host when only the Ceph hosts reach the endpoint.
+rgw_tenants_api_host: localhost
+
+# TLS verification for those boto3 calls.
+# For a private CA, point rgw_tenants_ca_bundle at a PEM file on rgw_tenants_api_host.
 rgw_tenants_validate_certs: true
 rgw_tenants_ca_bundle: ""
 
@@ -80,7 +82,7 @@ rgw_tenants_list: []
 # The OIDC realm to federate. One provider is registered per tenant account.
 #   provider_url  token issuer incl. https:// (matches the JWT iss), no trailing slash
 #   client_ids    accepted audiences (the RGW-facing OIDC client id(s))
-#   thumbprints   SHA1 hex of the JWKS signing cert (use=sig x5c), NOT the TLS chain
+#   thumbprints   SHA1 hex of the JWKS signing cert (use=sig x5c), not the TLS chain
 rgw_tenants_oidc:
   provider_url: ""
   client_ids: []

@@ -12,6 +12,9 @@ __metaclass__ = type
 
 import json
 
+from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw_discovery import (
+    policy_removals,
+)
 from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw_iam import (
     IAMError, loads, permission_document, same, trust_document,
 )
@@ -30,8 +33,8 @@ class Runner:
         """Run, and abort unless RGW accepted it.
 
         RGW answers a policy naming an action it does not know by discarding the whole
-        document and still exiting 0, leaving the role with no permissions at all. Never
-        soften these output checks to a warning.
+        document and still exiting 0, leaving the role with no permissions at all, so the
+        output checks are fatal.
         """
         rc, out, err = self._run(*args)
         blob = out + err
@@ -41,14 +44,9 @@ class Runner:
 
 
 def drop_policies(rgw, name, account, live):
-    """DeleteRole refuses while ANY inline or managed policy remains, so clear both."""
-    for policy in live.get("PermissionPolicies") or []:
-        rgw.must(f"delete policy {policy['PolicyName']} on {name}", "role-policy", "delete",
-                 f"--role-name={name}", f"--account-id={account}",
-                 f"--policy-name={policy['PolicyName']}")
-    for arn in live.get("ManagedPermissionPolicies") or []:
-        rgw.must(f"detach {arn} from {name}", "role", "policy", "detach",
-                 f"--role-name={name}", f"--account-id={account}", f"--policy-arn={arn}")
+    """Clear every policy off a role so DeleteRole accepts it; see policy_removals."""
+    for what, args in policy_removals(name, account, live):
+        rgw.must(what, *args)
 
 
 def tag_pairs(role):
@@ -79,8 +77,19 @@ class Reconciler:
         """Every role in the account, by name. radosgw-admin pages internally."""
         rc, out, err = self.rgw("role", "list", f"--account-id={account}")
         if rc != 0:
+            # A dry run may find no account; only `account list` tells that from a failed read.
+            if self.dry_run and not self.account_listed(account):
+                self.actions.append(f"SKIP    {account}: account not created yet, "
+                                    f"every role below would be created")
+                return {}
             raise IAMError(f"role list {account}: {err.strip()[:300]}")
         return {r["RoleName"]: r for r in (loads(out) or [])}
+
+    def account_listed(self, account):
+        rc, out, err = self.rgw("account", "list")
+        if rc != 0:
+            raise IAMError(f"account list: {err.strip()[:300]}")
+        return account in (loads(out) or [])
 
     def create(self, line, name, account, trust, duration, _pre=None):
         self.act(line, f"create role {name}", "role", "create", f"--role-name={name}",
@@ -201,9 +210,13 @@ class Reconciler:
         """
         if not wanted:
             return
-        rc, out, _ = self.rgw("account", "get", f"--account-id={account}")
+        rc, out, err = self.rgw("account", "get", f"--account-id={account}")
         current = loads(out) if rc == 0 else None
         if current is None:
+            # Only a dry run may find no account.
+            if not self.dry_run:
+                raise IAMError(f"account get {account}: rc={rc} {err.strip()[:300]}; "
+                               f"limits for {tenant} not reconciled")
             self.actions.append(f"SKIP    {tenant} ({account}): account get failed, "
                                 f"limits not reconciled")
             return

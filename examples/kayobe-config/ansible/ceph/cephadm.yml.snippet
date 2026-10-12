@@ -1,7 +1,7 @@
 ---
-# Add these three imports to the end of etc/kayobe/ansible/ceph/cephadm.yml, after the
-# existing "Import Cephadm commands post playbook" line. The order is required: tenants
-# asserts STS is on, and IAM's trust policies name the providers tenants registers.
+# Append to etc/kayobe/ansible/ceph/cephadm.yml after the "Import Cephadm commands post
+# playbook" line. Keep this order: tenants asserts STS is on, and IAM's trust policies name
+# the providers tenants registers.
 
 - name: Import Cephadm STS playbook
   import_playbook: cephadm-sts.yml

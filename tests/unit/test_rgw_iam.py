@@ -18,8 +18,8 @@ from test_rgw_oidc_replace import _bind_fqcn
 _bind_fqcn()
 
 from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw_iam import (  # noqa: E402
-    SESSION_DURATION_MIN, IAMError, SpecError, compose, norm, permission_document, same,
-    trust_document,
+    SESSION_DURATION_MIN, IAMError, SpecError, compose, grant_path, norm,
+    permission_document, same, trust_document,
 )
 from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw_iam_reconcile import (  # noqa: E402
     Reconciler, Runner,
@@ -28,7 +28,7 @@ from ansible_collections.underknowledge.ceph_rgw.plugins.module_utils.rgw_iam_re
 
 def make_spec():
     return {
-        "grant_claim": "ceph_grants", "delegated_infix": "x",
+        "grant_claim": "s3iam", "grant_root": "/services/s3", "delegated_infix": "x",
         "provider_host": "idp/realms/r",
         "capabilities": {
             "objects-read": {"scope": "buckets",
@@ -103,6 +103,16 @@ class FakeRGW(object):
         return [c[:2] for c in self.calls]
 
 
+class AccountGetFails(FakeRGW):
+    """`account get` exits non-zero, as for an account that does not exist yet."""
+
+    def __call__(self, *args):
+        if args[:2] == ("account", "get"):
+            self.calls.append(args)
+            return 2, "", "account not found"
+        return super(AccountGetFails, self).__call__(*args)
+
+
 def live_role(name, trust, perm, policy_name="tenant", duration=3600, tags=None):
     role = {"RoleName": name, "MaxSessionDuration": duration,
             "AssumeRolePolicyDocument": json.dumps(trust),
@@ -154,7 +164,27 @@ class TestComposition(unittest.TestCase):
     def test_trust_demands_this_roles_own_grant(self):
         trust = trust_document(self.spec, compose(self.spec)[0])
         cond = trust["Statement"][0]["Condition"]["ForAnyValue:StringEquals"]
-        self.assertEqual(cond["idp/realms/r:ceph_grants"], "t1:reader")
+        self.assertEqual(cond["idp/realms/r:s3iam"], "/services/s3/t1/reader")
+
+    def test_trust_condition_key_is_the_claim_and_value_is_the_group_path(self):
+        spec = dict(self.spec, grant_claim="groups", grant_root="/svc/s3",
+                    provider_host="example/realms/r")
+        for role in compose(spec):
+            cond = trust_document(spec, role)["Statement"][0][
+                "Condition"]["ForAnyValue:StringEquals"]
+            self.assertEqual(list(cond), ["example/realms/r:groups"])
+            self.assertEqual(cond["example/realms/r:groups"],
+                             "/svc/s3/%s/%s" % (role["tenant"], role["role"]))
+
+    def test_grant_path_matches_the_trust_condition_value(self):
+        spec = dict(self.spec, grant_claim="groups", grant_root="/svc/s3",
+                    provider_host="example/realms/r")
+        for role in compose(spec):
+            path = grant_path(spec, role)
+            self.assertEqual(path, "/svc/s3/%s/%s" % (role["tenant"], role["role"]))
+            cond = trust_document(spec, role)["Statement"][0][
+                "Condition"]["ForAnyValue:StringEquals"]
+            self.assertEqual(cond["example/realms/r:groups"], path)
 
     def test_bucket_prefix_drives_scoping_and_the_default(self):
         spec = dict(self.spec, tenants=[{
@@ -232,6 +262,21 @@ class TestReconcile(unittest.TestCase):
         self.assertIn(("role-trust-policy", "modify"), fake.verbs())
         self.assertNotIn(("role", "delete"), fake.verbs())
         self.assertNotIn(("role", "create"), fake.verbs())
+
+    def limited(self):
+        return dict(self.spec, tenants=[dict(self.spec["tenants"][0],
+                                             limits={"max_roles": 100})])
+
+    def test_an_unreadable_account_fails_a_real_run(self):
+        fake = AccountGetFails(roles=live_from(self.spec, self.roles))
+        with self.assertRaises(IAMError):
+            Reconciler(self.limited(), fake).run(self.roles)
+
+    def test_an_unreadable_account_is_skipped_in_a_dry_run(self):
+        fake = AccountGetFails(roles=live_from(self.spec, self.roles))
+        rec = Reconciler(self.limited(), fake, dry_run=True)
+        rec.run(self.roles)
+        self.assertTrue(any(line.startswith("SKIP") for line in rec.actions), rec.actions)
 
     def test_dry_run_changes_nothing(self):
         fake = FakeRGW(roles=[])

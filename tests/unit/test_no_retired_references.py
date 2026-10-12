@@ -66,8 +66,8 @@ class TestNoRetiredReferences(unittest.TestCase):
     def test_no_tenant_name_example_carries_an_underscore(self):
         """RGW rejects '_' in <tenant>-<role>, so an underscored example is a trap.
 
-        A tenant entry is recognised by its account_id, which nothing else in the
-        collection carries; `name:` on its own is also roles, tasks and variables.
+        A tenant entry is recognised by its account_id, which nothing else in the collection
+        carries; `name:` on its own is also roles, tasks and variables.
         """
         offenders = []
         for path in collection_files():

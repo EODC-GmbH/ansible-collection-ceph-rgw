@@ -1,6 +1,5 @@
-# Usage-vs-quota arithmetic for the rgw_tenants report. Pure, so it runs on the control
-# host against whatever rgw_account_info already read, instead of a second helper staged
-# into the cluster to do the same sums.
+# Usage-vs-quota arithmetic for the rgw_tenants report. Pure; it runs on the control host
+# against what rgw_account_info already read.
 
 
 def _pct(used, cap):

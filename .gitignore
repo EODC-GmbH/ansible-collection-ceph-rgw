@@ -29,6 +29,10 @@ roles/*/files/__pycache__/
 # docs/ likewise: the README links operator documentation there by name, so ignoring
 # it means shipping a dangling pointer.
 !docs/*.md
+!tests/integration/README.md
+
+# A live test-cluster file left in the tree; the scripts default to ~/.config instead.
+tests/integration/test-cluster.env
 
 # Editor / temp / backup files (nano, vim, emacs, generic scratch).
 *~

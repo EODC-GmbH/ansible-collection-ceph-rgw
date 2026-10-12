@@ -1,6 +1,5 @@
 ---
-# rgw_sts: native RGW STS without Keystone. OIDC providers are registered by rgw_tenants
-# and the web-identity tenant roles by rgw_iam.
+# rgw_sts: native RGW STS without Keystone.
 
 # Host owning the cephadm bootstrap keyring; all radosgw-admin/ceph work runs there.
 rgw_sts_bootstrap_host: "{{ groups['mons'][0] }}"
@@ -12,8 +11,7 @@ rgw_sts_fsid: ""
 # `ceph orch ls --service-type rgw` if it is not literally rgw.rgw.
 rgw_sts_service_name: "rgw.rgw"
 
-# STS session-token signing key, from vault. Required: the role refuses to enable STS
-# without it. 16+ random characters.
+# STS session-token signing key, from vault. Required; 16+ random characters.
 rgw_sts_key: ""
 
 # Standalone IAM roles for AssumeRole / GetSessionToken. Each item:

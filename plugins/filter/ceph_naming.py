@@ -1,15 +1,16 @@
-# Naming filters for ceph_rgw. The single place these identifiers get built, so the roles
-# and playbooks stay in sync.
+# Naming filters for ceph_rgw. The roles and playbooks build these identifiers only here.
 #
 # The user ARN is <account_id>:user/<display-name> and trust-policy Principals match
 # against it, so uid and display-name must be the identical Ceph-safe string: a divergence
 # makes STS AssumeRole silently stop matching.
 #
-#   account name  <org>-<purpose>[-<qualifier>]   lowercase, [a-z0-9-], <=55ch  initrode-data-prod
-#   root user     iam-<account>-root[-<descriptor>]                             iam-initrode-data-prod-root-erika_schroeder
-#   group         <account>-<role>                 hyphen-separated, no iam-     initrode-data-prod-readers
+#   account name  <org>-<purpose>[-<qualifier>]   lowercase, [a-z0-9-], <=55ch  raviga-data-prod
+#   extra root    iam-<account>-root-<descriptor>                               iam-raviga-data-prod-root-erika_schroeder
 #
-# The charset is forced by RGW, which validates an IAM role name TWICE and applies both:
+# The primary root (<account>root) is built inline by the role and generators, and service
+# user uids come from rgw_service_user_name in rgw_iam_users.py.
+#
+# The charset is forced by RGW, which validates an IAM role name twice and applies both:
 # rgw_rest_iam.cc validate_iam_role_name is [\w+=,.@-]+, and rgw_role.cc
 # RGWRole::validate_input is [A-Za-z0-9:=,.@-]+, reached unconditionally from
 # RadosRole::create. The intersection has no underscore, and roles are named
@@ -51,11 +52,10 @@ def ceph_descriptor(name):
 def ceph_account_slug(name):
     """Slug a label down to a valid account name: [a-z0-9-], <=55 chars.
 
-    The mirror image of ceph_descriptor: an account name folds spaces and underscores to
-    '-' because RGW's two role-name validators intersect at [A-Za-z0-9=,.@-] and roles are
-    named <account>-<role>, so an underscore in an account name makes every one of its
-    roles uncreatable. Raises if nothing usable survives, or if the result is too long to
-    carry a role suffix under MAX_ROLE_NAME_LEN.
+    The mirror image of ceph_descriptor: spaces and underscores fold to '-', since an
+    underscore makes every role of the account uncreatable (see the charset note above).
+    Raises if nothing usable survives, or if the result is too long to carry a role suffix
+    under MAX_ROLE_NAME_LEN.
     """
     text = str(name).strip().lower()
     for src, dst in _GERMAN.items():
@@ -75,40 +75,23 @@ def ceph_account_slug(name):
     return text
 
 
-def ceph_root_uid(account, descriptor=None):
-    """Build the account-root uid iam-<account>-root[-<descriptor>].
+def ceph_root_uid(account, descriptor):
+    """Build an extra root uid iam-<account>-root-<descriptor>.
 
     descriptor must already be [a-z0-9_]+ (run person names through ceph_descriptor
     first). Feed the result to both --uid and --display-name; they must match.
     """
     if not ceph_account_valid(account):
         raise ValueError("ceph_root_uid: %r is not a valid account name" % (account,))
-    base = "iam-%s-root" % account
-    if descriptor in (None, ""):
-        return base
-    if not _DESCRIPTOR_RE.match(str(descriptor)):
+    if not _DESCRIPTOR_RE.match(str(descriptor or "")):
         raise ValueError("ceph_root_uid: descriptor %r is not [a-z0-9_]+" % (descriptor,))
-    return "%s-%s" % (base, descriptor)
+    return "iam-%s-root-%s" % (account, descriptor)
 
 
 def ceph_account_valid(account):
-    """True for a lowercase [a-z0-9-] name of at most 55 characters (initrode-data-prod)."""
+    """True for a lowercase [a-z0-9-] name of at most 55 characters (raviga-data-prod)."""
     text = str(account)
     return bool(_ACCOUNT_RE.match(text)) and len(text) <= _MAX_ACCOUNT_LEN
-
-
-def ceph_group(account, role):
-    """Build a group name <account>-<role>, with no iam- prefix (groups are not users).
-
-    role is lowercased, with spaces and underscores turned into hyphens.
-    """
-    if not ceph_account_valid(account):
-        raise ValueError("ceph_group: %r is not a valid account name" % (account,))
-    role_slug = re.sub(r"[^a-z0-9-]", "", re.sub(r"[ _]+", "-", str(role).strip().lower()))
-    role_slug = re.sub(r"-+", "-", role_slug).strip("-")
-    if not role_slug:
-        raise ValueError("ceph_group: role %r sanitizes to empty" % (role,))
-    return "%s-%s" % (account, role_slug)
 
 
 class FilterModule:
@@ -120,5 +103,4 @@ class FilterModule:
             "ceph_descriptor": ceph_descriptor,
             "ceph_root_uid": ceph_root_uid,
             "ceph_account_valid": ceph_account_valid,
-            "ceph_group": ceph_group,
         }

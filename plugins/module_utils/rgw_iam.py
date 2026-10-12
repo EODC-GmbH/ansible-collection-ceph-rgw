@@ -4,8 +4,9 @@
 """Composition of the per-tenant IAM roles a federated user assumes, and their policies.
 
 The grant model is m:n, users x tenants x roles. A federated token carries a multivalued
-claim of `<tenant>:<role>` strings and each role's trust policy demands its own one, so one
-token can hold grants in several tenants and RGW picks the matching role at assume time.
+claim of group paths `<grant_root>/<tenant>/<role>` and each role's trust policy requires its
+own path, so one token can hold grants in several tenants and RGW picks the matching role at
+assume time.
 """
 
 from __future__ import absolute_import, division, print_function
@@ -180,20 +181,29 @@ def compose_users(spec):
     return out
 
 
-def trust_document(spec, role):
-    """Federate the account's OIDC provider and require the role's own grant string.
+def grant_path(spec, role):
+    """The group path whose membership grants this role: `<grant_root>/<tenant>/<role>`.
 
-    ForAnyValue because the claim is an array; RGW routes both forms through the same
-    code, but the AWS spec distinguishes them.
+    The trust policy matches this string, and the IdP must hold a group at this path.
     """
-    account, tenant = role["account_id"], role["tenant"]
+    return f"{spec['grant_root']}/{role['tenant']}/{role['role']}"
+
+
+def trust_document(spec, role):
+    """Federate the account's OIDC provider and require the role's own grant path.
+
+    The claim carries the full path of each group the user is in; RGW compares it verbatim.
+    ForAnyValue because the claim is an array: RGW routes both forms through the same code,
+    but the AWS spec distinguishes them.
+    """
+    account = role["account_id"]
     host = spec["provider_host"]
     return {"Version": "2012-10-17", "Statement": [{
         "Effect": "Allow",
         "Principal": {"Federated": [f"arn:aws:iam::{account}:oidc-provider/{host}"]},
         "Action": ["sts:AssumeRoleWithWebIdentity"],
         "Condition": {"ForAnyValue:StringEquals": {
-            f"{host}:{spec['grant_claim']}": f"{tenant}:{role['role']}"}}}]}
+            f"{host}:{spec['grant_claim']}": grant_path(spec, role)}}}]}
 
 
 def permission_document(spec, role):

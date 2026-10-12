@@ -1,0 +1,35 @@
+---
+# Mint an access/secret key pair per stem and vault-encrypt it as <stem>_access_key /
+# <stem>_secret_key. Registers _rgw_gen_enc; _rgw_gen_vault_text joins its !vault blocks.
+# Imported by rgw_new_tenant.yml and tasks/add_user.yml, after tasks/vault_id.yml.
+#
+# Inputs:
+#   _rgw_gen_key_stems   e.g. [vault_rgw_tenants_raviga_web, vault_rgw_tenants_raviga_web_root_backup]
+
+# The password lookup with /dev/null generates without storing, and the plaintext goes on stdin
+# to keep it out of argv. The environment pins ansible-vault to the resolved vault id, so an
+# ansible.cfg or ANSIBLE_VAULT_* setting cannot pick another secret. check_mode: false because
+# this writes nothing and the write that follows needs the output.
+- name: Encrypt the access and secret key of each user
+  ansible.builtin.command:
+    argv: [ansible-vault, encrypt_string, --encrypt-vault-id, "{{ _rgw_gen_vault_label }}",
+           --stdin-name, "{{ item.0 }}_{{ item.1 }}"]
+    stdin: >-
+      {{ ('IAM' ~ lookup('ansible.builtin.password', '/dev/null length=17 chars=ascii_uppercase,digits'))
+         if item.1 == 'access_key'
+         else lookup('ansible.builtin.password', '/dev/null length=40 chars=ascii_letters,digits') }}
+    stdin_add_newline: false
+  environment:
+    ANSIBLE_VAULT_IDENTITY_LIST: "{{ _rgw_gen_vault_label }}@{{ _rgw_gen_vault_source }}"
+    ANSIBLE_VAULT_PASSWORD_FILE: "{{ _rgw_gen_vault_source }}"
+  loop: "{{ _rgw_gen_key_stems | product(['access_key', 'secret_key']) | list }}"
+  loop_control:
+    label: "{{ item.0 }}_{{ item.1 }}"
+  register: _rgw_gen_enc
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Collect the new vault blocks
+  ansible.builtin.set_fact:
+    _rgw_gen_vault_text: "{{ _rgw_gen_enc.results | map(attribute='stdout') | join('\n') }}"

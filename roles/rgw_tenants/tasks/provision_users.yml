@@ -11,14 +11,40 @@
     secret_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.0.name | replace('-', '_')) ~ '_svc_' ~ item.1.name ~ '_secret_key') }}"
     rotate_keys: "{{ (rgw_tenants_rotate_keys | default(false) | bool) or (item.0.rotate_keys | default(false) | bool) }}"
     suspended: "{{ item.1.suspended | default(false) | bool }}"
+    keys: "{{ item.1.access_keys | default([]) }}"
     fsid: "{{ rgw_tenants_fsid | default(omit, true) }}"
   loop: "{{ _rgw_tenants_present | subelements('users', skip_missing=true) }}"
   loop_control:
     label: "{{ item.1.name | underknowledge.ceph_rgw.rgw_service_user_name(item.0.name) }}"
+  register: _rgw_tenants_users_reg
   become: true
   when:
     - (item.1.state | default('present')) != 'absent'
     - inventory_hostname == rgw_tenants_bootstrap_host
+
+# Without rotate_keys an existing user keeps its cluster keys, so vault drift would go
+# unnoticed until a client gets 403. Users skipped as state: absent have no keys_match.
+- name: Stop when a service user's vaulted keys do not match the cluster
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - item.keys_match | default(none) is not sameas false or 'rotated' in item.actions
+      - item.keys_drift | default([]) | length == 0 or 'rotated' in item.actions
+    fail_msg: >-
+      {% if item.user.access_key_ids | default(['?']) | length == 0 %}
+      {{ item.item.1.name | underknowledge.ceph_rgw.rgw_service_user_name(item.item.0.name) }}
+      holds no key on the cluster, so the vaulted pair cannot match;
+      a key removed by hand is not put back on its own, in case it was revoked on purpose.
+      {% else %}vault keys for {{ item.item.1.name | underknowledge.ceph_rgw.rgw_service_user_name(item.item.0.name) }}
+      do not match the cluster's
+      (the primary pair, or an access_keys entry whose secret differs).{% endif %}
+      Set rotate_keys: true on tenant {{ item.item.0.name }}
+      to move the cluster onto the vaulted pair, or restore the previous
+      vault_rgw_tenants_{{ item.item.0.name | replace('-', '_') }}_svc_{{ item.item.1.name }}_access_key/_secret_key.
+  loop: "{{ _rgw_tenants_users_reg.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.1.name | underknowledge.ceph_rgw.rgw_service_user_name(item.item.0.name) }}"
+  when: inventory_hostname == rgw_tenants_bootstrap_host
 
 - name: Remove absent service users
   underknowledge.ceph_rgw.rgw_account_user:

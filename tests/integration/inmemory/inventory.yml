@@ -1,0 +1,16 @@
+---
+# One local "mon" for the in-memory cluster, and localhost as rgw_tenants_api_host.
+# inmemory.sh sets the interpreter, which needs ansible-core and boto3.
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+      ansible_python_interpreter: "{{ lookup('env', 'FAKE_CEPH_PYTHON') }}"
+  children:
+    mons:
+      hosts:
+        inmemory0:
+          ansible_connection: local
+          ansible_python_interpreter: "{{ lookup('env', 'FAKE_CEPH_PYTHON') }}"
+          # The plays become root for cephadm; the fakes need no privileges.
+          ansible_become: false

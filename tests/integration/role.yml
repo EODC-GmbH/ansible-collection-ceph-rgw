@@ -1,0 +1,12 @@
+---
+# One role (or one of its task files) on its own, for scenarios.sh:
+#   -e scenario_role=rgw_tenants [-e scenario_tasks_from=verify]
+- name: Run one ceph_rgw role
+  hosts: "{{ rgw_converge_hosts | default('mons') }}"
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Apply the role
+      ansible.builtin.include_role:
+        name: "underknowledge.ceph_rgw.{{ scenario_role }}"
+        tasks_from: "{{ scenario_tasks_from | default('main') }}"

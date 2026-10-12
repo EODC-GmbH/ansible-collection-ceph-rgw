@@ -1,9 +1,7 @@
 ---
-# Add this entry under the `collections:` list in etc/kayobe/ansible/requirements.yml;
-# `kayobe control host bootstrap` runs ansible-galaxy against that file. Pin `version` to
-# a tag or commit; a branch tracks its tip. To vendor the collection instead, see the
-# README's Install section.
+# Add under `collections:` in etc/kayobe/ansible/requirements.yml and run
+# `kayobe control host bootstrap`. Pin `version` to a tag or commit; a branch tracks its tip.
 collections:
-  - name: https://github.com/EODC-GmbH/ansible-collection-ceph-rgw.git
+  - name: https://github.com/Underknowledge/ansible-collection-ceph-rgw.git
     type: git
     version: main/2025.1

@@ -1,9 +1,6 @@
 ---
 # rgw_iam: the IAM roles a federated user assumes inside a tenant account. Run after
 # rgw_tenants, which creates the accounts and their OIDC providers.
-#
-# A user holds grants "<tenant>:<role>" in one multivalued OIDC claim; each grant selects
-# one IAM role in one account.
 
 # Host owning the cephadm bootstrap keyring; all radosgw-admin work runs there.
 rgw_iam_bootstrap_host: "{{ groups['mons'][0] }}"
@@ -11,17 +8,24 @@ rgw_iam_bootstrap_host: "{{ groups['mons'][0] }}"
 rgw_iam_fsid: ""
 
 # Drop-in tenant directory, the same one rgw_tenants loads, so this role also runs alone.
-# Tenants already in rgw_tenants_list are merged in by name.
+# Merged by name with rgw_tenants_list.
 rgw_iam_dir: "{{ rgw_tenants_dir | default('') }}"
+# Tenant names a run reconciles; empty means all. Prune acts per reconciled tenant, so
+# the others' roles are left alone.
+rgw_iam_limit: "{{ rgw_tenants_limit | default([]) }}"
 rgw_iam_tenants: []
 
-# The OIDC issuer registered with each account by rgw_tenants. Must match the token's iss
+# OIDC issuer registered with each account by rgw_tenants. Must match the token's iss
 # exactly, without a trailing slash.
 rgw_iam_provider_url: "{{ rgw_tenants_oidc.provider_url | default('') }}"
 
-# The claim carrying a user's grants as "<tenant>:<role>" strings. The IdP must emit
-# exactly this name, or every assume fails with AccessDenied.
-rgw_iam_grant_claim: ceph_grants
+# Multivalued claim carrying a user's grants as group paths. If the IdP emits a different
+# name, every assume fails with AccessDenied.
+rgw_iam_grant_claim: s3iam
+
+# Root of the grant group tree. A grant is the group path "<root>/<tenant>/<role>", which
+# the trust policy matches verbatim. Starts with "/", no trailing slash.
+rgw_iam_grant_root: /services/s3
 
 # Name of the inline policy this role puts on each platform role. Any other inline policy
 # on a platform role is reported (and removed under rgw_iam_prune).
@@ -44,13 +48,13 @@ rgw_iam_account_limits:
 
 # IAM API endpoint and TLS settings for putting service users' inline policies, as each
 # tenant's account-root. Unused when no tenant declares users.
+# The calls are made from rgw_iam_api_host, whose Python needs boto3.
+# rgw_iam_ca_bundle is a path on that host.
 rgw_iam_endpoint: "{{ rgw_tenants_endpoint | default('') }}"
+rgw_iam_api_host: "{{ rgw_tenants_api_host | default('localhost') }}"
 rgw_iam_s3_region: "{{ rgw_tenants_s3_region | default('us-east-1') }}"
 rgw_iam_validate_certs: "{{ rgw_tenants_validate_certs | default(true) }}"
 rgw_iam_ca_bundle: "{{ rgw_tenants_ca_bundle | default('') }}"
-
-# Deprecated alias for --check.
-rgw_iam_dry_run: false
 
 # Remove platform-namespace roles no longer in config and inline policies this role did
 # not put there, and rebuild a role tagged out of band. Never touches <tenant>-x-* roles.
@@ -60,8 +64,7 @@ rgw_iam_prune: false
 # scope determines the resources generated:
 #   buckets        arn:aws:s3:::<bucket> and arn:aws:s3:::<bucket>/<prefix>
 #   account        "*": ListAllMyBuckets is checked against arn:aws:s3::<tenant>:*, which
-#                  only "*" reliably matches. RGW still answers only for the calling
-#                  account.
+#                  only "*" reliably matches. RGW still answers only for the caller.
 #   delegated-iam  arn:aws:iam::<account>:role/<tenant>-<infix>-*
 #
 # Action names are RGW's, not AWS's, and one unrecognised name makes RGW discard the whole
@@ -91,7 +94,7 @@ rgw_iam_capabilities:
       - s3:DeleteBucket
   bucket-policy-read:
     # s3:PutBucketPolicy is in no bundle: a bucket policy is the only way to share across
-    # accounts. iam-delegate gets around this; see the note there.
+    # accounts. iam-delegate gets around this; see below.
     scope: buckets
     actions:
       - s3:GetBucketPolicy
@@ -116,7 +119,7 @@ rgw_iam_capabilities:
       - s3:ListAllMyBuckets
   iam-delegate:
     # Account-wide authority. The resource prefix limits which roles the holder may
-    # create, not what their policies say, and RGW has no permissions boundary: a holder
+    # create, not what their policies grant, and RGW has no permissions boundary: a holder
     # can create <tenant>-x-anything with s3:* and assume it. Other accounts stay out of
     # reach.
     #

@@ -1,0 +1,154 @@
+---
+# Put through the IAM API: squid's radosgw-admin can only attach its six Resource "*"
+# managed policies to a user.
+- name: Compose service-user policies
+  ansible.builtin.set_fact:
+    _rgw_iam_users: "{{ _rgw_iam_spec | underknowledge.ceph_rgw.rgw_service_users }}"
+
+- name: Assert the IAM endpoint is set when service users are declared
+  ansible.builtin.assert:
+    that: rgw_iam_endpoint | length > 0
+    fail_msg: >-
+      Service users are declared, but rgw_iam_endpoint (default rgw_tenants_endpoint) is
+      empty. Their policies go through the IAM API, so it must be set.
+    quiet: true
+  when: _rgw_iam_users | length > 0
+
+# rgw_sts may have just restarted RGW, which reports running before it listens.
+- name: Wait for the RGW endpoint to answer
+  ansible.builtin.uri:
+    url: "{{ rgw_iam_endpoint }}"
+    method: GET
+    status_code: [200, 403, 405]
+    validate_certs: false
+  register: rgw_iam_endpoint_reg
+  until: rgw_iam_endpoint_reg.status in [200, 403, 405]
+  retries: 30
+  delay: 5
+  delegate_to: "{{ rgw_iam_api_host }}"
+  # Read-only, and the previews below need the endpoint.
+  check_mode: false
+  when:
+    - _rgw_iam_users | length > 0
+    - inventory_hostname == rgw_iam_bootstrap_host
+
+# A vault/cluster key mismatch otherwise surfaces as a bare AccessDenied from IAM.
+# Check mode because rgw_tenants owns the root user.
+- name: Compare the vaulted account-root keys with the cluster
+  underknowledge.ceph_rgw.rgw_account_user:
+    uid: "{{ item.root_user | default(item.name ~ 'root') }}"
+    account_id: "{{ item.account_id }}"
+    access_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_access_key') }}"
+    secret_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_secret_key') }}"
+    check_identity: false
+    fsid: "{{ rgw_iam_fsid | default(omit, true) }}"
+  loop: "{{ rgw_iam_tenants | selectattr('name', 'in', _rgw_iam_users | map(attribute='tenant') | list) | list }}"
+  loop_control:
+    label: "{{ item.root_user | default(item.name ~ 'root') }}"
+  register: _rgw_iam_keys
+  check_mode: true
+  changed_when: false
+  become: true
+  when: inventory_hostname == rgw_iam_bootstrap_host
+
+# The probe returns no `user` for a missing root user.
+- name: List tenants whose service-user policy preview is skipped
+  ansible.builtin.set_fact:
+    _rgw_iam_preview_skipped: "{{ (_uncreated + (_rotating | map(attribute='name') | list)) | unique if ansible_check_mode else [] }}"
+  vars:
+    _uncreated: >-
+      {{ _rgw_iam_keys.results | default([]) | rejectattr('user', 'defined')
+         | selectattr('keys_match', 'defined') | selectattr('keys_match', 'none')
+         | map(attribute='item.name') | list }}
+    _mismatched: >-
+      {{ _rgw_iam_keys.results | default([]) | selectattr('keys_match', 'defined')
+         | selectattr('keys_match', 'sameas', false) | map(attribute='item') | list }}
+    _rotating: >-
+      {{ _mismatched if (rgw_tenants_rotate_keys | default(false) | bool)
+         else _mismatched | selectattr('rotate_keys', 'defined') | selectattr('rotate_keys') | list }}
+  when: inventory_hostname == rgw_iam_bootstrap_host
+
+- name: Stop when a tenant's vaulted keys do not match the cluster
+  ansible.builtin.assert:
+    quiet: true
+    that: item.keys_match is sameas true or item.item.name in _rgw_iam_preview_skipped
+    fail_msg: >-
+      {% if item.keys_match is none %}account-root user
+      {{ item.item.root_user | default(item.item.name ~ 'root') }}
+      was not found in {{ item.item.account_id }}.
+      Run rgw_tenants for {{ item.item.name }} first.
+      {% else %}{% if item.user.access_key_ids | default(['?']) | length == 0 %}
+      {{ item.item.root_user | default(item.item.name ~ 'root') }}
+      holds no key on the cluster, so the vaulted pair cannot match;
+      a key removed by hand is not put back on its own, in case it was revoked on purpose.
+      {% else %}vault keys for {{ item.item.name }}
+      do not match the cluster's keys for {{ item.item.root_user | default(item.item.name ~ 'root') }}.{% endif %}
+      Run rgw_tenants with rotate_keys: true on this tenant
+      to move the cluster onto the vaulted pair,
+      or restore the previous
+      vault_rgw_tenants_{{ item.item.name | replace('-', '_') }}_access_key/_secret_key.
+      {% endif %}
+  loop: "{{ _rgw_iam_keys.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: inventory_hostname == rgw_iam_bootstrap_host
+
+- name: Report tenants whose service-user policy preview is skipped
+  ansible.builtin.debug:
+    msg: >-
+      {{ _rgw_iam_preview_skipped }}: account-root user not created yet, or key rotation pending,
+      so this preview skips their service-user policies.
+  when:
+    - _rgw_iam_preview_skipped | default([]) | length > 0
+    - inventory_hostname == rgw_iam_bootstrap_host
+
+# Tells the policy step on rgw_iam_api_host whether a refused key has a holder.
+- name: Look up who holds each service-user tenant's account-root key
+  underknowledge.ceph_rgw.rgw_key_holder_info:
+    access_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_access_key') }}"
+    fsid: "{{ rgw_iam_fsid | default(omit, true) }}"
+  loop: "{{ rgw_iam_tenants | selectattr('name', 'in', _rgw_iam_users | map(attribute='tenant') | list) | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _rgw_iam_holders_reg
+  become: true
+  when:
+    - item.name not in _rgw_iam_preview_skipped | default([])
+    - inventory_hostname == rgw_iam_bootstrap_host
+
+- name: Index the key holders by tenant
+  ansible.builtin.set_fact:
+    _rgw_iam_holders: "{{ dict(_probed | map(attribute='item.name') | zip(_probed | map(attribute='key_holder'))) }}"
+  vars:
+    _probed: "{{ _rgw_iam_holders_reg.results | default([]) | selectattr('key_holder', 'defined') | list }}"
+  when: inventory_hostname == rgw_iam_bootstrap_host
+
+- name: Reconcile service-user policies
+  underknowledge.ceph_rgw.rgw_user_policy:
+    user_name: "{{ item.name }}"
+    policy_name: "{{ rgw_iam_policy_name }}"
+    policy: "{{ item.policy }}"
+    prune: "{{ rgw_iam_prune | bool }}"
+    endpoint_url: "{{ rgw_iam_endpoint }}"
+    region: "{{ rgw_iam_s3_region }}"
+    validate_certs: "{{ rgw_iam_validate_certs | bool }}"
+    ca_bundle: "{{ rgw_iam_ca_bundle | default(omit, true) }}"
+    access_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.tenant | replace('-', '_')) ~ '_access_key') }}"
+    secret_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.tenant | replace('-', '_')) ~ '_secret_key') }}"
+    key_holder: "{{ _rgw_iam_holders[item.tenant] }}"
+  loop: "{{ _rgw_iam_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: rgw_iam_users_reg
+  delegate_to: "{{ rgw_iam_api_host }}"
+  become: false
+  when:
+    - item.tenant not in _rgw_iam_preview_skipped | default([])
+    - inventory_hostname == rgw_iam_bootstrap_host
+
+- name: Report what the service-user reconcile did
+  ansible.builtin.debug:
+    msg: "{{ rgw_iam_users_reg.results | default([]) | map(attribute='actions', default=[]) | flatten }}"
+  when:
+    - _rgw_iam_users | length > 0
+    - inventory_hostname == rgw_iam_bootstrap_host

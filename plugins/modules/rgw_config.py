@@ -11,16 +11,15 @@ DOCUMENTATION = r"""
 ---
 module: rgw_config
 short_description: Set one Ceph cluster configuration option, on drift only
-version_added: "0.2.0"
+version_added: "0.3.0"
 description:
   - Reads C(ceph config get <who> <option>) and runs C(ceph config set) only when the
     stored value differs, so a converge that changes nothing reports nothing and no
     handler is notified.
-  - This module drives the C(ceph) binary rather than C(radosgw-admin), through the same
-    native/container/cephadm resolution as the rest of the collection.
-  - O(value) and O(secret_value) do the same thing. They are separate because a
-    C(no_log) value blacks out every matching string in the task's output, so a readable
-    option should not share a parameter with a secret one.
+  - Runs C(ceph), not C(radosgw-admin), through the same native/container/cephadm
+    resolution as the rest of the collection.
+  - O(value) and O(secret_value) do the same thing. They are separate because a C(no_log)
+    value masks every matching string in the task's output.
 options:
   who:
     description: The configuration entity, as C(ceph config) names it.
@@ -67,16 +66,12 @@ options:
 author:
   - Underknowledge (@Underknowledge)
 notes:
-  - O(secret_value) is not kept off the process table. C(ceph config set) only takes the
-    value on its command line, so for the duration of the call it is readable in
-    C(/proc/<pid>/cmdline) on the host running the command. Mount C(/proc) with
-    C(hidepid=2) there. On the Ansible side the value is C(no_log) and never reaches a
-    log or a diff.
+  - O(secret_value) is passed to C(ceph config set) on argv. On the Ansible side it is
+    C(no_log).
   - C(changed) is what tells a caller to restart RGW. This module notifies nothing and
     restarts nothing itself.
-  - An unset option is not distinguishable from one set to its default; C(ceph config get)
-    answers with the compiled-in default either way, so setting an option to its default
-    value reports no change.
+  - C(ceph config get) answers an unset option with its compiled-in default, so setting an
+    option to its default reports no change.
 requirements:
   - the C(ceph) CLI reachable natively, in a container image, or through C(cephadm shell)
 """

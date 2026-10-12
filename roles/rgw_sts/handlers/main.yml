@@ -1,6 +1,6 @@
 ---
-# rgw_sts_key and rgw_s3_auth_use_sts are read at RGW startup, so a change to either takes
-# effect only once radosgw restarts. `ceph orch restart` is async.
+# rgw_sts_key and rgw_s3_auth_use_sts are read at startup. The module waits until the daemons
+# run again.
 - name: Restart RGW
   underknowledge.ceph_rgw.rgw_orch_restart:
     service: "{{ rgw_sts_service_name }}"

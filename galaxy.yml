@@ -2,7 +2,7 @@
 # Pulled by kayobe as a git source, the same way it pulls ansible-collection-cephadm.
 namespace: underknowledge
 name: ceph_rgw
-version: 0.3.0
+version: 0.7.0
 readme: README.md
 authors:
   - Underknowledge
@@ -23,11 +23,14 @@ tags:
   - multitenancy
   - kayobe
   - cephadm
-repository: https://github.com/EODC-GmbH/ansible-collection-ceph-rgw
-issues: https://github.com/EODC-GmbH/ansible-collection-ceph-rgw/issues
+repository: https://github.com/Underknowledge/ansible-collection-ceph-rgw
+issues: https://github.com/Underknowledge/ansible-collection-ceph-rgw/issues
 build_ignore:
   - examples
   - .git
   - "*.tar.gz"
   - "__pycache__"
   - "*.pyc"
+  - .pytest_cache
+  # Live-cluster test tooling; it stays in the repository.
+  - tests/integration

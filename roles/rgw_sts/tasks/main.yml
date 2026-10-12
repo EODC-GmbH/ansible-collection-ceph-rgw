@@ -1,7 +1,5 @@
 ---
-# secret_value is no_log in the module's argument spec and redacted from Ceph's output,
-# so a failure still shows Ceph's message. `ceph config set` takes the value only on argv,
-# so it is briefly visible in `ps` on the mon; mount /proc with hidepid=2 there.
+# secret_value is no_log and redacted from Ceph's output. `ceph config set` takes it on argv.
 - name: Set the STS signing key
   underknowledge.ceph_rgw.rgw_config:
     option: rgw_sts_key
@@ -13,7 +11,6 @@
     - rgw_sts_key | length > 0
     - inventory_hostname == rgw_sts_bootstrap_host
 
-# Without a key, RGW signs session tokens with its public default "sts".
 - name: Assert an STS signing key is set
   ansible.builtin.assert:
     quiet: true
@@ -30,11 +27,11 @@
     value: "true"
     fsid: "{{ rgw_sts_fsid | default(omit, true) }}"
   notify: Restart RGW
+  # rgw_tenants reads this under --check, where the value is not set yet.
+  register: rgw_sts_auth_reg
   become: true
   when: inventory_hostname == rgw_sts_bootstrap_host
 
-# rgw_role addresses a role only within an account, so fail here with the reason rather
-# than mid-loop.
 - name: Assert every STS role names an account
   ansible.builtin.assert:
     quiet: true
@@ -51,8 +48,7 @@
                          | map(attribute='name') | list }}
   when: inventory_hostname == rgw_sts_bootstrap_host
 
-# policies is authoritative: purge_policies defaults true, so a policy dropped from config
-# is deleted from the role.
+# purge_policies defaults true: a policy dropped from config is deleted from the role.
 - name: Reconcile the STS roles
   underknowledge.ceph_rgw.rgw_role:
     name: "{{ item.name }}"

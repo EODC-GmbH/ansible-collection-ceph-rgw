@@ -1,13 +1,12 @@
 # rgw_sts
 
-Enables native Ceph RGW STS on a cephadm-deployed cluster: sets the
-session-token signing key (`rgw_sts_key`), turns on STS auth for the S3 endpoint
-(`rgw_s3_auth_use_sts`), and creates standalone IAM roles for `AssumeRole` /
-`GetSessionToken`. RGW reads both settings at startup, so the role restarts
-RGW when either changes.
+Enables native Ceph RGW STS on a cephadm-deployed cluster: sets the session-token signing key
+(`rgw_sts_key`), turns on STS auth for the S3 endpoint (`rgw_s3_auth_use_sts`), and creates
+standalone IAM roles for `AssumeRole` / `GetSessionToken`. RGW reads both settings at startup, so
+the role restarts RGW when either changes.
 
-Run it first, as its own play, before `rgw_tenants`. OIDC providers are managed
-by `rgw_tenants` and the web-identity tenant roles by `rgw_iam`.
+Run it first, as its own play, before `rgw_tenants`. OIDC providers are managed by `rgw_tenants`
+and the web-identity tenant roles by `rgw_iam`.
 
 Runs on `hosts: mons`; cluster work runs on `rgw_sts_bootstrap_host` through the
 `rgw_config` and `rgw_role` modules.
@@ -27,12 +26,11 @@ deleted from the role. Every task supports `--check`.
 
 ## Rotating the signing key
 
-`rgw_sts_key` signs and encrypts every STS session token. Changing it
-**invalidates every live session** when RGW restarts.
+`rgw_sts_key` signs and encrypts every STS session token. Changing it invalidates every live
+session when RGW restarts.
 
-Ceph's option description says "16 hexadecimal characters" but suggests
-`openssl rand -hex 16`, which emits 32. Use the command. RGW does not validate
-the format.
+Ceph's option description says "16 hexadecimal characters" but suggests `openssl rand -hex 16`,
+which emits 32. Use the command. RGW does not validate the format.
 
 ```sh
 openssl rand -hex 16          # 32 hex chars; store as vault_rgw_sts_key
@@ -40,13 +38,12 @@ kayobe playbook run .../ansible/ceph/cephadm-sts.yml --check --diff
 kayobe playbook run .../ansible/ceph/cephadm-sts.yml
 ```
 
-Then check federation with `roles/rgw_tenants/files/verify_federation.py`; a
-key problem shows up as `AccessDenied` at assume time.
+Then check federation with `roles/rgw_tenants/files/verify_federation.py`; a key problem shows
+up as `AccessDenied` at assume time.
 
 ### Checking for drift without printing the key
 
-Compare the key by length and hash rather than printing it with
-`ceph config get`:
+Compare the key by length and hash instead of printing it with `ceph config get`:
 
 ```yaml
 - underknowledge.ceph_rgw.rgw_config_info:
@@ -59,5 +56,5 @@ Compare the key by length and hash rather than printing it with
       matches config: {{ live.config.rgw_sts_key == rgw_sts_key }}
 ```
 
-`ceph config log 200` shows when the option last changed, but also prints old
-and new values in plaintext.
+`ceph config log 200` shows when the option last changed, but also prints old and new values in
+plaintext.

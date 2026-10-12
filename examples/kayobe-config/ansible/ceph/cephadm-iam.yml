@@ -1,12 +1,7 @@
 ---
-# Reconcile the IAM roles a federated user assumes inside each tenant account, with
-# underknowledge.ceph_rgw.rgw_iam. Runs after cephadm-tenants.yml: the accounts and their
-# OIDC providers must exist before a role's trust policy federates them.
-#
-# Plan a change with --check --diff. A clean run reporting no changes is also the
-# verification that the estate matches config.
-#
-# Copy this file into etc/kayobe/ansible/ceph/ and add its import_playbook to cephadm.yml.
+# Reconcile the per-tenant IAM roles with underknowledge.ceph_rgw.rgw_iam. Runs after
+# cephadm-tenants.yml, which creates the OIDC providers the trust policies reference.
+# --check --diff shows the plan; a run with no changes means IAM matches config.
 - name: Reconcile Ceph RGW tenant IAM roles
   gather_facts: false
   hosts: mons

@@ -61,32 +61,46 @@ class FakeS3(object):
 
 class TestCredentialProbe(unittest.TestCase):
 
-    def test_a_nonexistent_key_is_a_missing_prerequisite(self):
-        """ListBuckets is a GET, so its 403 does carry InvalidAccessKeyId."""
-        client = FakeS3(list_error=client_error("InvalidAccessKeyId", 403))
+    def test_access_denied_is_a_refusal(self):
+        """What squid answers for a key nobody holds, and for a user lacking permission."""
+        client = FakeS3(list_error=client_error("AccessDenied", 403))
         with self.assertRaises(bucket.ProbeError) as caught:
             bucket.owned_buckets(client)
-        self.assertTrue(caught.exception.prerequisite)
+        self.assertEqual(caught.exception.refused, "AccessDenied")
 
-    def test_a_bare_403_on_listbuckets_is_also_a_missing_prerequisite(self):
-        """RGW does not always attach a code. A caller with no account cannot list."""
+    def test_a_bare_403_on_listbuckets_is_also_a_refusal(self):
+        """RGW does not always attach a code."""
         client = FakeS3(list_error=client_error(None, 403))
         with self.assertRaises(bucket.ProbeError) as caught:
             bucket.owned_buckets(client)
-        self.assertTrue(caught.exception.prerequisite)
+        self.assertEqual(caught.exception.refused, "403")
 
-    def test_an_unrelated_listbuckets_failure_is_not_a_prerequisite(self):
+    def test_a_403_with_another_reason_is_not_a_refusal(self):
+        """Clock skew: the user exists, so teardown must not say gone."""
+        client = FakeS3(list_error=client_error("RequestTimeTooSkewed", 403))
+        with self.assertRaises(bucket.ProbeError) as caught:
+            bucket.owned_buckets(client)
+        self.assertIsNone(caught.exception.refused)
+
+    def test_a_suspended_user_is_a_refusal_the_holder_lookup_resolves(self):
+        """The key lookup then finds the suspended user, so teardown does not say gone."""
+        client = FakeS3(list_error=client_error("UserSuspended", 403))
+        with self.assertRaises(bucket.ProbeError) as caught:
+            bucket.owned_buckets(client)
+        self.assertEqual(caught.exception.refused, "UserSuspended")
+
+    def test_an_unrelated_listbuckets_failure_is_not_a_refusal(self):
         client = FakeS3(list_error=client_error("ServiceUnavailable", 503))
         with self.assertRaises(bucket.ProbeError) as caught:
             bucket.owned_buckets(client)
-        self.assertFalse(caught.exception.prerequisite)
+        self.assertIsNone(caught.exception.refused)
 
     def test_a_transport_failure_is_a_probe_error_not_a_traceback(self):
         """A bad ca_bundle or an untrusted certificate surfaces as BotoCoreError."""
         client = FakeS3(list_error=bucket.BotoCoreError())
         with self.assertRaises(bucket.ProbeError) as caught:
             bucket.owned_buckets(client)
-        self.assertFalse(caught.exception.prerequisite)
+        self.assertIsNone(caught.exception.refused)
 
     def test_good_credentials_yield_the_owned_set(self):
         self.assertEqual(bucket.owned_buckets(FakeS3(owned=["a", "b"])), {"a", "b"})
@@ -95,8 +109,8 @@ class TestCredentialProbe(unittest.TestCase):
 class TestExistence(unittest.TestCase):
 
     def test_an_owned_bucket_needs_no_head_request(self):
-        client = FakeS3(owned=["acme-data"])
-        self.assertTrue(bucket.bucket_exists(client, "acme-data", {"acme-data"}))
+        client = FakeS3(owned=["aviato-data"])
+        self.assertTrue(bucket.bucket_exists(client, "aviato-data", {"aviato-data"}))
         self.assertEqual(client.heads, [])
 
     def test_a_404_means_the_name_is_free(self):
@@ -105,12 +119,12 @@ class TestExistence(unittest.TestCase):
 
     def test_a_403_on_a_name_we_do_not_own_is_a_collision(self):
         """The credentials were already proven good, so 403 here is unambiguous."""
-        client = FakeS3(owned=["ststest-data"],
-                        head_errors={"acme-data": client_error(None, 403)})
+        client = FakeS3(owned=["raviga-data"],
+                        head_errors={"aviato-data": client_error(None, 403)})
         with self.assertRaises(bucket.ProbeError) as caught:
-            bucket.bucket_exists(client, "acme-data", {"ststest-data"})
+            bucket.bucket_exists(client, "aviato-data", {"raviga-data"})
         self.assertIn("held by another account", caught.exception.msg)
-        self.assertFalse(caught.exception.prerequisite)
+        self.assertIsNone(caught.exception.refused)
 
     def test_a_head_success_for_an_unlisted_bucket_is_still_a_collision(self):
         """Reachable but not ours: it is not this account's bucket to reuse."""
@@ -134,7 +148,7 @@ class TestUnprobedExit(unittest.TestCase):
                 raise SystemExit
 
         try:
-            bucket.unprobed_exit(Module(), ["a"], "absent", "InvalidAccessKeyId")
+            bucket.unprobed_exit(Module(), ["a"], "absent", "AccessDenied")
         except SystemExit:
             pass
         self.assertFalse(captured["changed"])

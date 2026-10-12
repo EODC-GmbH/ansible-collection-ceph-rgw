@@ -1,7 +1,6 @@
 ---
-# Read-only check of accounts, buckets and quotas, run on demand. IAM roles are checked
-# by cephadm-iam.yml under --check, the federation path by
-# roles/rgw_tenants/files/verify_federation.py.
+# Read-only check of accounts, buckets and quotas. IAM roles are checked by cephadm-iam.yml
+# under --check, federation by roles/rgw_tenants/files/verify_federation.py.
 - name: Verify Ceph RGW tenants
   gather_facts: false
   hosts: mons

@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__),
 from ceph_usage import ceph_over_quota, ceph_usage_report  # noqa: E402
 
 
-def account(aid="RGW1", name="tenant-acme", quota=None, stats=None):
+def account(aid="RGW1", name="tenant-aviato", quota=None, stats=None):
     return {"id": aid, "name": name, "quota": quota or {}, "stats": stats or {}}
 
 
@@ -56,9 +56,9 @@ class TestPercentages(unittest.TestCase):
 class TestNaming(unittest.TestCase):
 
     def test_the_configured_tenant_name_wins_over_the_account_name(self):
-        rows = ceph_usage_report([account(name="tenant-acme")],
-                                 [{"account_id": "RGW1", "name": "acme"}])
-        self.assertEqual(rows[0]["name"], "acme")
+        rows = ceph_usage_report([account(name="tenant-aviato")],
+                                 [{"account_id": "RGW1", "name": "aviato"}])
+        self.assertEqual(rows[0]["name"], "aviato")
 
     def test_an_unmanaged_account_keeps_its_own_name(self):
         rows = ceph_usage_report([account(aid="RGW9", name="tenant-stray")], [])

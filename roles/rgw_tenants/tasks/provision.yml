@@ -8,6 +8,27 @@
 - name: Provision service users
   ansible.builtin.include_tasks: provision_users.yml
 
+# Tells the boto3 steps on rgw_tenants_api_host whether a refused key has a holder.
+- name: Look up who holds each tenant's account-root key
+  underknowledge.ceph_rgw.rgw_key_holder_info:
+    access_key: "{{ lookup('vars', 'vault_rgw_tenants_' ~ (item.name | replace('-', '_')) ~ '_access_key') }}"
+    fsid: "{{ rgw_tenants_fsid | default(omit, true) }}"
+  loop: "{{ _rgw_tenants_present }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _rgw_tenants_holders_reg
+  become: true
+  when:
+    - item.name not in _rgw_tenants_rotation_pending | default([])
+    - inventory_hostname == rgw_tenants_bootstrap_host
+
+- name: Index the key holders by tenant
+  ansible.builtin.set_fact:
+    _rgw_tenants_holders: "{{ dict(_probed | map(attribute='item.name') | zip(_probed | map(attribute='key_holder'))) }}"
+  vars:
+    _probed: "{{ _rgw_tenants_holders_reg.results | default([]) | selectattr('key_holder', 'defined') | list }}"
+  when: inventory_hostname == rgw_tenants_bootstrap_host
+
 - name: Provision OIDC providers
   ansible.builtin.include_tasks: provision_oidc.yml
 
